@@ -20,6 +20,15 @@ export async function initDb() {
       chat_id      BIGINT PRIMARY KEY,
       registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS link_codes (
+      code            VARCHAR(8) PRIMARY KEY,
+      primary_chat_id BIGINT NOT NULL,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS chat_links (
+      chat_id         BIGINT PRIMARY KEY,
+      primary_chat_id BIGINT NOT NULL
+    );
   `);
 }
 
@@ -28,6 +37,43 @@ export async function registerChat(chatId: number) {
     'INSERT INTO chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING',
     [chatId]
   );
+}
+
+export async function resolvePrimaryChat(chatId: number): Promise<number> {
+  const result = await pool.query(
+    'SELECT primary_chat_id FROM chat_links WHERE chat_id = $1',
+    [chatId]
+  );
+  return result.rows[0]?.primary_chat_id ?? chatId;
+}
+
+export async function createLinkCode(chatId: number): Promise<string> {
+  const primary = await resolvePrimaryChat(chatId);
+  await pool.query('DELETE FROM link_codes WHERE primary_chat_id = $1', [primary]);
+  const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+  await pool.query(
+    'INSERT INTO link_codes (code, primary_chat_id) VALUES ($1, $2)',
+    [code, primary]
+  );
+  return code;
+}
+
+// Returns the primary chat_id on success, null if code is invalid or self-link.
+export async function linkChat(chatId: number, code: string): Promise<number | null> {
+  const result = await pool.query(
+    'SELECT primary_chat_id FROM link_codes WHERE code = $1',
+    [code.toUpperCase()]
+  );
+  if (!result.rows[0]) return null;
+  const primaryChatId: number = result.rows[0].primary_chat_id;
+  if (primaryChatId === chatId) return null;
+  await pool.query(
+    `INSERT INTO chat_links (chat_id, primary_chat_id) VALUES ($1, $2)
+     ON CONFLICT (chat_id) DO UPDATE SET primary_chat_id = EXCLUDED.primary_chat_id`,
+    [chatId, primaryChatId]
+  );
+  await pool.query('DELETE FROM link_codes WHERE code = $1', [code.toUpperCase()]);
+  return primaryChatId;
 }
 
 export async function logFeed(chatId: number, amountMl: number, loggedAt: Date) {

@@ -10,6 +10,9 @@ import {
   getRecentFeeds,
   getRecentNappies,
   getAllChats,
+  resolvePrimaryChat,
+  createLinkCode,
+  linkChat,
 } from './db';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -98,7 +101,9 @@ bot.command('help', async (ctx) => {
     `🍼 /fed 120ml 20m ago — log with a time offset\n` +
     `🚼 /nappy — show nappy type buttons\n` +
     `📊 /status — last feed & nappy\n` +
-    `🎛️ /menu — show quick-action buttons`
+    `🎛️ /menu — show quick-action buttons\n` +
+    `🔗 /share — generate a link code to share with your partner\n` +
+    `🔗 /join <code> — join your partner's shared tracker`
   );
 });
 
@@ -116,7 +121,8 @@ bot.command('fed', async (ctx) => {
   const offsetMs = parseTimeOffset(args);
   const loggedAt = new Date(Date.now() - offsetMs);
 
-  await logFeed(ctx.chat.id, amountMl, loggedAt);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await logFeed(primaryId, amountMl, loggedAt);
 
   const suffix = offsetMs > 0 ? ` (logged as ${formatAgo(loggedAt)})` : '';
   await ctx.reply(`✅ 🍼 Reuben had ${amountMl}ml${suffix}`, {
@@ -131,12 +137,40 @@ bot.command('nappy', async (ctx) => {
 
 bot.command('status', async (ctx) => {
   await registerChat(ctx.chat.id);
-  await sendStatus(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
 });
 
 bot.command('history', async (ctx) => {
   await registerChat(ctx.chat.id);
-  await sendHistory(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+});
+
+bot.command('share', async (ctx) => {
+  await registerChat(ctx.chat.id);
+  const code = await createLinkCode(ctx.chat.id);
+  await ctx.reply(
+    `🔗 Your link code is: *${code}*\n\nAsk your partner to send the bot:\n/join ${code}\n\nThe code expires after one use.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('join', async (ctx) => {
+  await registerChat(ctx.chat.id);
+  const code = ctx.match.trim();
+  if (!code) {
+    await ctx.reply('Please provide a code: /join ABC123');
+    return;
+  }
+  const primaryId = await linkChat(ctx.chat.id, code);
+  if (!primaryId) {
+    await ctx.reply('❌ Invalid or expired code. Ask your partner to send /share again.');
+    return;
+  }
+  await ctx.reply('✅ You\'re now linked! You and your partner share the same baby tracker.', {
+    reply_markup: menuKeyboard(),
+  });
 });
 
 // --- Inline button handlers ---
@@ -146,7 +180,8 @@ bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
   const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
   if (!chatId) { await ctx.answerCallbackQuery(); return; }
   await registerChat(chatId);
-  await logNappy(chatId, type, new Date());
+  const primaryId = await resolvePrimaryChat(chatId);
+  await logNappy(primaryId, type, new Date());
   await ctx.editMessageText(`✅ ${NAPPY_EMOJI[type]} Nappy change logged (${type})`);
   await ctx.answerCallbackQuery();
 });
@@ -159,13 +194,19 @@ bot.callbackQuery('menu:fed', async (ctx) => {
 bot.callbackQuery('menu:status', async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
-  if (chatId) await sendStatus(chatId, (text, extra) => ctx.reply(text, extra));
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
 });
 
 bot.callbackQuery('menu:history', async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
-  if (chatId) await sendHistory(chatId, (text, extra) => ctx.reply(text, extra));
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
 });
 
 // --- Shared status helper ---
@@ -220,20 +261,27 @@ async function sendHistory(
   );
 }
 
-// --- 3-hour feeding reminder (checks every 5 minutes) ---
+// --- Feeding reminders (checks every 5 minutes) ---
 
 cron.schedule('*/5 * * * *', async () => {
   const chats = await getAllChats();
 
   for (const chatId of chats) {
-    const lastFeed = await getLastFeed(chatId);
+    const primaryId = await resolvePrimaryChat(chatId);
+    const lastFeed = await getLastFeed(primaryId);
     if (!lastFeed) continue;
 
     const msSince = Date.now() - new Date(lastFeed.logged_at).getTime();
+    const twoHalfHours = 2.5 * 60 * 60 * 1000;
     const threeHours = 3 * 60 * 60 * 1000;
     const fiveMinutes = 5 * 60 * 1000;
 
-    if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
+    if (msSince >= twoHalfHours && msSince < twoHalfHours + fiveMinutes) {
+      await bot.api.sendMessage(
+        chatId,
+        `🍼 Time to prepare milk! Reuben's next feed is in 30 minutes.`
+      );
+    } else if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
       await bot.api.sendMessage(
         chatId,
         `⏰ Time to feed Reuben! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
@@ -250,12 +298,14 @@ async function main() {
   console.log('DB ready');
 
   await bot.api.setMyCommands([
-    { command: 'fed',    description: '🍼 Log a feed — /fed 120ml [20m ago]' },
-    { command: 'nappy',  description: '🚼 Log a nappy change' },
+    { command: 'fed',     description: '🍼 Log a feed — /fed 120ml [20m ago]' },
+    { command: 'nappy',   description: '🚼 Log a nappy change' },
     { command: 'status',  description: '📊 Show last feed & nappy' },
     { command: 'history', description: '📋 Show last 3 feeds & nappy changes' },
     { command: 'menu',    description: '🎛️ Show quick-action buttons' },
-    { command: 'help',   description: '❓ Show all commands' },
+    { command: 'share',   description: '🔗 Generate a code to share with your partner' },
+    { command: 'join',    description: '🔗 Join your partner\'s shared tracker' },
+    { command: 'help',    description: '❓ Show all commands' },
   ]);
   console.log('Commands registered');
 
