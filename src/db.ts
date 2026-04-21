@@ -60,6 +60,22 @@ export async function getLastNappy(chatId: number) {
   return result.rows[0] ?? null;
 }
 
+export async function getRecentFeeds(chatId: number, limit = 3) {
+  const result = await pool.query(
+    `SELECT * FROM events WHERE chat_id = $1 AND type = 'feed' ORDER BY logged_at DESC LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows;
+}
+
+export async function getRecentNappies(chatId: number, limit = 3) {
+  const result = await pool.query(
+    `SELECT * FROM events WHERE chat_id = $1 AND type = 'nappy' ORDER BY logged_at DESC LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows;
+}
+
 export async function getAllChats(): Promise<number[]> {
   const result = await pool.query('SELECT chat_id FROM chats');
   return result.rows.map((r) => Number(r.chat_id));

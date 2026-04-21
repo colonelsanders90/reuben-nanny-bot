@@ -7,6 +7,8 @@ import {
   logNappy,
   getLastFeed,
   getLastNappy,
+  getRecentFeeds,
+  getRecentNappies,
   getAllChats,
 } from './db';
 
@@ -69,7 +71,8 @@ function nappyKeyboard() {
 function menuKeyboard() {
   return new InlineKeyboard()
     .text('🍼 Fed now', 'menu:fed')
-    .text('📊 Status', 'menu:status').row()
+    .text('📊 Status', 'menu:status')
+    .text('📋 History', 'menu:history').row()
     .text('💧 Wet nappy', 'nappy:wet')
     .text('💩 Dirty', 'nappy:dirty')
     .text('💩💧 Both', 'nappy:both');
@@ -131,12 +134,19 @@ bot.command('status', async (ctx) => {
   await sendStatus(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
 });
 
+bot.command('history', async (ctx) => {
+  await registerChat(ctx.chat.id);
+  await sendHistory(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+});
+
 // --- Inline button handlers ---
 
 bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
   const type = ctx.match[1];
-  await registerChat(ctx.chat.id);
-  await logNappy(ctx.chat.id, type, new Date());
+  const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
+  if (!chatId) { await ctx.answerCallbackQuery(); return; }
+  await registerChat(chatId);
+  await logNappy(chatId, type, new Date());
   await ctx.editMessageText(`✅ ${NAPPY_EMOJI[type]} Nappy change logged (${type})`);
   await ctx.answerCallbackQuery();
 });
@@ -148,14 +158,21 @@ bot.callbackQuery('menu:fed', async (ctx) => {
 
 bot.callbackQuery('menu:status', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await sendStatus(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+  const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
+  if (chatId) await sendStatus(chatId, (text, extra) => ctx.reply(text, extra));
+});
+
+bot.callbackQuery('menu:history', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id;
+  if (chatId) await sendHistory(chatId, (text, extra) => ctx.reply(text, extra));
 });
 
 // --- Shared status helper ---
 
 async function sendStatus(
   chatId: number,
-  reply: (text: string, extra?: { reply_markup: InlineKeyboard }) => Promise<void>
+  reply: (text: string, extra?: { reply_markup: InlineKeyboard }) => Promise<unknown>
 ) {
   const [lastFeed, lastNappy] = await Promise.all([
     getLastFeed(chatId),
@@ -178,6 +195,29 @@ async function sendStatus(
   await reply([feedLine, nextLine, nappyLine].filter(Boolean).join('\n'), {
     reply_markup: menuKeyboard(),
   });
+}
+
+async function sendHistory(
+  chatId: number,
+  reply: (text: string, extra?: { reply_markup: InlineKeyboard }) => Promise<unknown>
+) {
+  const [feeds, nappies] = await Promise.all([
+    getRecentFeeds(chatId, 3),
+    getRecentNappies(chatId, 3),
+  ]);
+
+  const feedLines = feeds.length
+    ? feeds.map((f) => `  🍼 ${f.amount_ml}ml — ${formatAgo(new Date(f.logged_at))}`).join('\n')
+    : '  No feeds logged yet';
+
+  const nappyLines = nappies.length
+    ? nappies.map((n) => `  ${NAPPY_EMOJI[n.nappy_type] ?? '🚼'} ${n.nappy_type} — ${formatAgo(new Date(n.logged_at))}`).join('\n')
+    : '  No nappy changes logged yet';
+
+  await reply(
+    `📋 Last 3 feeds:\n${feedLines}\n\n📋 Last 3 nappy changes:\n${nappyLines}`,
+    { reply_markup: menuKeyboard() }
+  );
 }
 
 // --- 3-hour feeding reminder (checks every 5 minutes) ---
@@ -212,8 +252,9 @@ async function main() {
   await bot.api.setMyCommands([
     { command: 'fed',    description: '🍼 Log a feed — /fed 120ml [20m ago]' },
     { command: 'nappy',  description: '🚼 Log a nappy change' },
-    { command: 'status', description: '📊 Show last feed & nappy' },
-    { command: 'menu',   description: '🎛️ Show quick-action buttons' },
+    { command: 'status',  description: '📊 Show last feed & nappy' },
+    { command: 'history', description: '📋 Show last 3 feeds & nappy changes' },
+    { command: 'menu',    description: '🎛️ Show quick-action buttons' },
     { command: 'help',   description: '❓ Show all commands' },
   ]);
   console.log('Commands registered');
