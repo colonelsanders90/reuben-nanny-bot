@@ -10,7 +10,15 @@ import {
   getAllChats,
 } from './db';
 
-const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!);
+const token = process.env.TELEGRAM_BOT_TOKEN;
+if (!token) {
+  console.error('ERROR: TELEGRAM_BOT_TOKEN is not set');
+  process.exit(1);
+}
+
+console.log('Token present, length:', token.length);
+
+const bot = new Bot(token);
 
 // --- Time helpers ---
 
@@ -48,26 +56,36 @@ function formatNextFeed(lastFeedTime: Date): string {
   return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
 }
 
+const NAPPY_EMOJI: Record<string, string> = {
+  wet: '💧',
+  dirty: '💩',
+  both: '💩💧',
+};
+
 // --- Commands ---
 
 bot.command('start', async (ctx) => {
   await registerChat(ctx.chat.id);
   await ctx.reply(
     `👶 Reuben Nanny Bot ready!\n\n` +
-    `/fed 120ml — log a feed now\n` +
-    `/fed 120ml 20m ago — log a feed with a time offset\n` +
-    `/nappy wet — log a nappy change (wet / dirty / both)\n` +
-    `/status — show last feed & nappy\n` +
-    `/help — show this message`
+    `🍼 /fed 120ml — log a feed now\n` +
+    `🍼 /fed 120ml 20m ago — log with a time offset\n` +
+    `💧 /nappywet — wet nappy\n` +
+    `💩 /nappydirty — dirty nappy\n` +
+    `💩💧 /nappyboth — wet & dirty\n` +
+    `📊 /status — last feed & nappy\n` +
+    `❓ /help — show this message`
   );
 });
 
 bot.command('help', async (ctx) => {
   await ctx.reply(
-    `/fed 120ml — log a feed now\n` +
-    `/fed 120ml 20m ago — log a feed with a time offset\n` +
-    `/nappy wet — log a nappy change (wet / dirty / both)\n` +
-    `/status — show last feed & nappy`
+    `🍼 /fed 120ml — log a feed now\n` +
+    `🍼 /fed 120ml 20m ago — log with a time offset\n` +
+    `💧 /nappywet — wet nappy\n` +
+    `💩 /nappydirty — dirty nappy\n` +
+    `💩💧 /nappyboth — wet & dirty\n` +
+    `📊 /status — last feed & nappy`
   );
 });
 
@@ -88,21 +106,17 @@ bot.command('fed', async (ctx) => {
   await logFeed(ctx.chat.id, amountMl, loggedAt);
 
   const suffix = offsetMs > 0 ? ` (logged as ${formatAgo(loggedAt)})` : '';
-  await ctx.reply(`✅ Reuben had ${amountMl}ml${suffix}`);
+  await ctx.reply(`✅ 🍼 Reuben had ${amountMl}ml${suffix}`);
 });
 
-bot.command('nappy', async (ctx) => {
-  await registerChat(ctx.chat.id);
-  const type = ctx.match.trim().toLowerCase();
+async function handleNappy(chatId: number, type: string, reply: (text: string) => Promise<void>) {
+  await logNappy(chatId, type, new Date());
+  await reply(`✅ ${NAPPY_EMOJI[type]} Nappy change logged (${type})`);
+}
 
-  if (!['wet', 'dirty', 'both'].includes(type)) {
-    await ctx.reply('Usage: /nappy wet | dirty | both');
-    return;
-  }
-
-  await logNappy(ctx.chat.id, type, new Date());
-  await ctx.reply(`✅ Nappy change logged (${type})`);
-});
+bot.command('nappywet',   async (ctx) => { await registerChat(ctx.chat.id); await handleNappy(ctx.chat.id, 'wet',   (t) => ctx.reply(t)); });
+bot.command('nappydirty', async (ctx) => { await registerChat(ctx.chat.id); await handleNappy(ctx.chat.id, 'dirty', (t) => ctx.reply(t)); });
+bot.command('nappyboth',  async (ctx) => { await registerChat(ctx.chat.id); await handleNappy(ctx.chat.id, 'both',  (t) => ctx.reply(t)); });
 
 bot.command('status', async (ctx) => {
   await registerChat(ctx.chat.id);
@@ -120,8 +134,9 @@ bot.command('status', async (ctx) => {
     ? `⏰ Next feed: ${formatNextFeed(new Date(lastFeed.logged_at))}`
     : '';
 
+  const nappyEmoji = lastNappy ? NAPPY_EMOJI[lastNappy.nappy_type] ?? '🚼' : '🚼';
   const nappyLine = lastNappy
-    ? `🚼 Last nappy: ${lastNappy.nappy_type} — ${formatAgo(new Date(lastNappy.logged_at))}`
+    ? `${nappyEmoji} Last nappy: ${lastNappy.nappy_type} — ${formatAgo(new Date(lastNappy.logged_at))}`
     : '🚼 No nappy changes logged yet';
 
   await ctx.reply([feedLine, nextLine, nappyLine].filter(Boolean).join('\n'));
@@ -155,6 +170,17 @@ cron.schedule('*/5 * * * *', async () => {
 async function main() {
   await initDb();
   console.log('DB ready');
+
+  await bot.api.setMyCommands([
+    { command: 'fed',        description: '🍼 Log a feed — /fed 120ml [20m ago]' },
+    { command: 'nappywet',   description: '💧 Log a wet nappy' },
+    { command: 'nappydirty', description: '💩 Log a dirty nappy' },
+    { command: 'nappyboth',  description: '💩💧 Log a wet & dirty nappy' },
+    { command: 'status',     description: '📊 Show last feed & nappy' },
+    { command: 'help',       description: '❓ Show all commands' },
+  ]);
+  console.log('Commands registered');
+
   bot.start();
   console.log('Reuben Nanny Bot running');
 }
