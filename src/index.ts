@@ -3,6 +3,8 @@ import cron from 'node-cron';
 import {
   initDb,
   registerChat,
+  authorizeChat,
+  getAuthorizedChats,
   logFeed,
   logNappy,
   getLastFeed,
@@ -13,6 +15,7 @@ import {
   resolvePrimaryChat,
   createLinkCode,
   linkChat,
+  VALID_NAPPY_TYPES,
 } from './db';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -23,24 +26,118 @@ if (!token) {
 
 const bot = new Bot(token);
 
-// --- Conversation state (per chat) ---
+// ============================================================
+// Security: chat allowlist
+// ============================================================
+//
+// Set ALLOWED_CHAT_IDS=id1,id2 in your environment to restrict
+// the bot to specific Telegram chat IDs.  Leave unset to run in
+// open mode (not recommended outside of local dev).
+
+const ALLOWED_CHAT_IDS_ENV: Set<number> = new Set(
+  (process.env.ALLOWED_CHAT_IDS ?? '')
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n))
+);
+
+const RESTRICTED_MODE = ALLOWED_CHAT_IDS_ENV.size > 0;
+
+// In-memory set — populated at startup from env + DB, updated on /join
+const authorizedChats = new Set<number>(ALLOWED_CHAT_IDS_ENV);
+
+function isAuthorized(chatId: number): boolean {
+  return !RESTRICTED_MODE || authorizedChats.has(chatId);
+}
+
+function grantAccess(chatId: number) {
+  authorizedChats.add(chatId);
+}
+
+// ============================================================
+// Security: rate limiting
+// ============================================================
+
+interface RateBucket { count: number; resetAt: number; }
+const rateBuckets = new Map<string, RateBucket>();
+
+/** Returns true if the request should be allowed. */
+function rateLimit(key: string, maxCount: number, windowMs: number): boolean {
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.count >= maxCount) return false;
+  bucket.count++;
+  return true;
+}
+
+// Prune expired buckets every 10 minutes to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (now >= bucket.resetAt) rateBuckets.delete(key);
+  }
+}, 10 * 60_000);
+
+/**
+ * Combined auth + rate-limit guard.
+ * Returns true if the request should proceed, false if rejected
+ * (the handler already replied/answered).
+ */
+async function guard(ctx: any, rateLimitKey?: string): Promise<boolean> {
+  const chatId: number = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat?.id;
+
+  if (!isAuthorized(chatId)) {
+    const msg = '🔒 This bot is private. You are not authorised to use it.';
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: msg, show_alert: true });
+    else await ctx.reply(msg);
+    return false;
+  }
+
+  const key = rateLimitKey ?? `cmd:${chatId}`;
+  if (!rateLimit(key, 20, 60_000)) {
+    const msg = '⏱️ Too many requests — please slow down.';
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: msg, show_alert: true });
+    else await ctx.reply(msg);
+    return false;
+  }
+
+  return true;
+}
+
+// ============================================================
+// Conversation state (per chat)
+// ============================================================
 
 type ConvStep = 'feed_ml' | 'feed_time' | 'nappy_time';
 interface ConvState { step: ConvStep; amountMl?: number; nappyType?: string; }
 const conv = new Map<number, ConvState>();
 
-// --- Time helpers ---
+// ============================================================
+// Time helpers
+// ============================================================
+
+const MAX_BACKDATE_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 function parseHHMM(text: string): Date | null {
   const match = text.trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return null;
-  const h = parseInt(match[1]);
-  const m = parseInt(match[2]);
+  const h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
   if (h > 23 || m > 59) return null;
+
   const result = new Date();
   result.setHours(h, m, 0, 0);
-  // if time is in the future, assume it was yesterday
+
+  // If time is in the future, assume it was yesterday
   if (result.getTime() > Date.now() + 60_000) result.setDate(result.getDate() - 1);
+
+  // Reject times more than 12 hours in the past
+  if (result.getTime() < Date.now() - MAX_BACKDATE_MS) return null;
+
   return result;
 }
 
@@ -80,7 +177,9 @@ const NAPPY_EMOJI: Record<string, string> = {
   both: '💩💧',
 };
 
-// --- Keyboards ---
+// ============================================================
+// Keyboards
+// ============================================================
 
 function menuKeyboard() {
   return new InlineKeyboard()
@@ -109,10 +208,13 @@ function getChatId(ctx: any): number {
   return ctx.chat?.id ?? ctx.callbackQuery?.message?.chat?.id;
 }
 
-// --- Commands ---
+// ============================================================
+// Commands
+// ============================================================
 
 bot.command('start', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   await ctx.reply('👶 Reuben Nanny Bot ready! What do you need?', {
     reply_markup: menuKeyboard(),
@@ -121,11 +223,13 @@ bot.command('start', async (ctx) => {
 
 bot.command('menu', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   await ctx.reply('What do you need?', { reply_markup: menuKeyboard() });
 });
 
 bot.command('help', async (ctx) => {
+  if (!await guard(ctx)) return;
   await ctx.reply(
     `🍼 *Feeding:* Tap "Fed now" → pick ml → set time\n` +
     `🚼 *Nappy:* Tap wet/dirty/both → set time\n` +
@@ -140,6 +244,7 @@ bot.command('help', async (ctx) => {
 
 bot.command('fed', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   conv.set(ctx.chat.id, { step: 'feed_ml' });
   await ctx.reply('How many ml did Reuben have?\n\nTap a quick amount or type a number:', {
@@ -149,6 +254,7 @@ bot.command('fed', async (ctx) => {
 
 bot.command('nappy', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   await ctx.reply('What type of nappy change?', {
     reply_markup: new InlineKeyboard()
@@ -161,6 +267,7 @@ bot.command('nappy', async (ctx) => {
 
 bot.command('status', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
   await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
@@ -168,12 +275,14 @@ bot.command('status', async (ctx) => {
 
 bot.command('history', async (ctx) => {
   conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
   await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
 });
 
 bot.command('share', async (ctx) => {
+  if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   const code = await createLinkCode(ctx.chat.id);
   await ctx.reply(
@@ -182,6 +291,8 @@ bot.command('share', async (ctx) => {
   );
 });
 
+// /join is intentionally not behind guard() — it IS the registration step.
+// Instead it gets a stricter rate limit to prevent brute-forcing link codes.
 bot.command('join', async (ctx) => {
   await registerChat(ctx.chat.id);
   const code = ctx.match.trim();
@@ -189,19 +300,29 @@ bot.command('join', async (ctx) => {
     await ctx.reply('Please provide a code: /join ABC123');
     return;
   }
+  // 5 attempts per 10 minutes per chat
+  if (!rateLimit(`join:${ctx.chat.id}`, 5, 10 * 60_000)) {
+    await ctx.reply('⏱️ Too many join attempts. Please wait 10 minutes before trying again.');
+    return;
+  }
   const primaryId = await linkChat(ctx.chat.id, code);
   if (!primaryId) {
     await ctx.reply('❌ Invalid or expired code. Ask your partner to send /share again.');
     return;
   }
+  grantAccess(ctx.chat.id);
+  await authorizeChat(ctx.chat.id);
   await ctx.reply("✅ You're now linked! You and your partner share the same baby tracker.", {
     reply_markup: menuKeyboard(),
   });
 });
 
-// --- Inline button: Fed now ---
+// ============================================================
+// Inline buttons
+// ============================================================
 
 bot.callbackQuery('menu:fed', async (ctx) => {
+  if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
   await registerChat(chatId);
   conv.set(chatId, { step: 'feed_ml' });
@@ -211,11 +332,10 @@ bot.callbackQuery('menu:fed', async (ctx) => {
   });
 });
 
-// --- Inline button: ML quick-pick ---
-
 bot.callbackQuery(/^feed_ml:(\d+)$/, async (ctx) => {
+  if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
-  const amountMl = parseInt(ctx.match[1]);
+  const amountMl = parseInt(ctx.match[1], 10);
   conv.set(chatId, { step: 'feed_time', amountMl });
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
@@ -224,12 +344,17 @@ bot.callbackQuery(/^feed_ml:(\d+)$/, async (ctx) => {
   );
 });
 
-// --- Inline button: Nappy type (asks for time) ---
-
 bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
+  if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
-  await registerChat(chatId);
   const type = ctx.match[1];
+
+  if (!VALID_NAPPY_TYPES.has(type)) {
+    await ctx.answerCallbackQuery({ text: 'Invalid option', show_alert: true });
+    return;
+  }
+
+  await registerChat(chatId);
   conv.set(chatId, { step: 'nappy_time', nappyType: type });
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
@@ -238,9 +363,8 @@ bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
   );
 });
 
-// --- Inline button: Just now ---
-
 bot.callbackQuery('time:now', async (ctx) => {
+  if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
   const state = conv.get(chatId);
   await ctx.answerCallbackQuery();
@@ -253,8 +377,6 @@ bot.callbackQuery('time:now', async (ctx) => {
   );
 });
 
-// --- Inline button: Cancel ---
-
 bot.callbackQuery('cancel', async (ctx) => {
   const chatId = getChatId(ctx);
   conv.delete(chatId);
@@ -262,9 +384,8 @@ bot.callbackQuery('cancel', async (ctx) => {
   await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() });
 });
 
-// --- Inline button: Status / History ---
-
 bot.callbackQuery('menu:status', async (ctx) => {
+  if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery();
   const chatId = getChatId(ctx);
   if (chatId) {
@@ -274,6 +395,7 @@ bot.callbackQuery('menu:status', async (ctx) => {
 });
 
 bot.callbackQuery('menu:history', async (ctx) => {
+  if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery();
   const chatId = getChatId(ctx);
   if (chatId) {
@@ -282,7 +404,9 @@ bot.callbackQuery('menu:history', async (ctx) => {
   }
 });
 
-// --- Text input handler (custom ml or HH:MM time) ---
+// ============================================================
+// Text input handler (custom ml or HH:MM time)
+// ============================================================
 
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
@@ -292,8 +416,10 @@ bot.on('message:text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
+  if (!await guard(ctx)) return;
+
   if (state.step === 'feed_ml') {
-    const n = parseInt(text);
+    const n = parseInt(text, 10);
     if (isNaN(n) || n <= 0 || n > 600) {
       await ctx.reply('Please enter a valid amount in ml (e.g. 120):', {
         reply_markup: mlKeyboard(),
@@ -311,16 +437,19 @@ bot.on('message:text', async (ctx) => {
   if (state.step === 'feed_time' || state.step === 'nappy_time') {
     const loggedAt = parseHHMM(text);
     if (!loggedAt) {
-      await ctx.reply('Please enter the time as HH:MM (e.g. 14:30):', {
-        reply_markup: timeKeyboard(),
-      });
+      await ctx.reply(
+        'Please enter the time as HH:MM (e.g. 14:30). Times more than 12 hours ago are not accepted:',
+        { reply_markup: timeKeyboard() }
+      );
       return;
     }
-    await finishLog(chatId, state, loggedAt, (text, extra) => ctx.reply(text, extra));
+    await finishLog(chatId, state, loggedAt, (t, extra) => ctx.reply(t, extra));
   }
 });
 
-// --- Finish logging ---
+// ============================================================
+// Finish logging
+// ============================================================
 
 async function finishLog(
   chatId: number,
@@ -348,7 +477,9 @@ async function finishLog(
   }
 }
 
-// --- Status helper ---
+// ============================================================
+// Status helper
+// ============================================================
 
 async function sendStatus(
   chatId: number,
@@ -359,7 +490,7 @@ async function sendStatus(
     getLastNappy(chatId),
   ]);
 
-  const feedAgo = lastFeed ? formatAgo(new Date(lastFeed.logged_at)) : null;
+  const feedAgo  = lastFeed ? formatAgo(new Date(lastFeed.logged_at)) : null;
   const feedTime = lastFeed ? formatTime(new Date(lastFeed.logged_at)) : null;
   const feedLine = lastFeed
     ? `🍼 Last fed: ${lastFeed.amount_ml}ml — ${feedAgo} (${feedTime})`
@@ -369,10 +500,10 @@ async function sendStatus(
     ? `⏰ Next feed: ${formatNextFeed(new Date(lastFeed.logged_at))}`
     : '';
 
-  const nappyAgo = lastNappy ? formatAgo(new Date(lastNappy.logged_at)) : null;
-  const nappyTime = lastNappy ? formatTime(new Date(lastNappy.logged_at)) : null;
+  const nappyAgo   = lastNappy ? formatAgo(new Date(lastNappy.logged_at)) : null;
+  const nappyTime  = lastNappy ? formatTime(new Date(lastNappy.logged_at)) : null;
   const nappyEmoji = lastNappy ? (NAPPY_EMOJI[lastNappy.nappy_type] ?? '🚼') : '🚼';
-  const nappyLine = lastNappy
+  const nappyLine  = lastNappy
     ? `${nappyEmoji} Last nappy: ${lastNappy.nappy_type} — ${nappyAgo} (${nappyTime})`
     : '🚼 No nappy changes logged yet';
 
@@ -381,7 +512,9 @@ async function sendStatus(
   });
 }
 
-// --- History helper ---
+// ============================================================
+// History helper
+// ============================================================
 
 async function sendHistory(
   chatId: number,
@@ -412,41 +545,73 @@ async function sendHistory(
   );
 }
 
-// --- Feeding reminders (checks every 5 minutes) ---
+// ============================================================
+// Feeding reminders (checks every 5 minutes)
+// ============================================================
 
 cron.schedule('*/5 * * * *', async () => {
-  const chats = await getAllChats();
+  let chats: number[];
+  try {
+    chats = await getAllChats();
+  } catch (err) {
+    console.error('Cron: failed to fetch chats:', err);
+    return;
+  }
 
   for (const chatId of chats) {
-    const primaryId = await resolvePrimaryChat(chatId);
-    const lastFeed = await getLastFeed(primaryId);
-    if (!lastFeed) continue;
+    try {
+      const primaryId = await resolvePrimaryChat(chatId);
+      const lastFeed  = await getLastFeed(primaryId);
+      if (!lastFeed) continue;
 
-    const msSince = Date.now() - new Date(lastFeed.logged_at).getTime();
-    const twoHalfHours = 2.5 * 60 * 60 * 1000;
-    const threeHours = 3 * 60 * 60 * 1000;
-    const fiveMinutes = 5 * 60 * 1000;
+      const msSince      = Date.now() - new Date(lastFeed.logged_at).getTime();
+      const twoHalfHours = 2.5 * 60 * 60 * 1000;
+      const threeHours   = 3 * 60 * 60 * 1000;
+      const fiveMinutes  = 5 * 60 * 1000;
 
-    if (msSince >= twoHalfHours && msSince < twoHalfHours + fiveMinutes) {
-      await bot.api.sendMessage(
-        chatId,
-        `🍼 Time to prepare milk! Reuben's next feed is in 30 minutes.`
-      );
-    } else if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
-      await bot.api.sendMessage(
-        chatId,
-        `⏰ Time to feed Reuben! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
-        { reply_markup: menuKeyboard() }
-      );
+      if (msSince >= twoHalfHours && msSince < twoHalfHours + fiveMinutes) {
+        await bot.api.sendMessage(
+          chatId,
+          `🍼 Time to prepare milk! Reuben's next feed is in 30 minutes.`
+        );
+      } else if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
+        await bot.api.sendMessage(
+          chatId,
+          `⏰ Time to feed Reuben! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
+          { reply_markup: menuKeyboard() }
+        );
+      }
+    } catch (err) {
+      // Swallow per-chat errors (e.g. user blocked the bot) so one bad chat
+      // doesn't abort notifications for everyone else.
+      console.error(`Cron: error for chat ${chatId}:`, (err as Error).message);
     }
   }
 });
 
-// --- Start ---
+// ============================================================
+// Start
+// ============================================================
 
 async function main() {
   await initDb();
   console.log('DB ready');
+
+  // Persist env-var chat IDs to DB so they survive restarts
+  for (const id of ALLOWED_CHAT_IDS_ENV) await authorizeChat(id);
+
+  // Load all previously authorised chats (including joined partners) from DB
+  const dbAuthorized = await getAuthorizedChats();
+  for (const id of dbAuthorized) grantAccess(id);
+
+  if (!RESTRICTED_MODE) {
+    console.warn(
+      'WARNING: ALLOWED_CHAT_IDS is not set — bot is open to anyone. ' +
+      'Set ALLOWED_CHAT_IDS=<your chat id> to restrict access.'
+    );
+  } else {
+    console.log(`Restricted mode active — ${authorizedChats.size} authorised chat(s)`);
+  }
 
   await bot.api.setMyCommands([
     { command: 'fed',     description: '🍼 Log a feed' },
