@@ -10,6 +10,9 @@ import {
   getRecentFeeds,
   getRecentNappies,
   getAllChats,
+  resolvePrimaryChat,
+  createLinkCode,
+  linkChat,
 } from './db';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -127,8 +130,10 @@ bot.command('help', async (ctx) => {
     `🍼 *Feeding:* Tap "Fed now" → pick ml → set time\n` +
     `🚼 *Nappy:* Tap wet/dirty/both → set time\n` +
     `📊 /status — last feed & nappy status\n` +
-    `📋 /history — last 3 feeds & nappy changes\n` +
-    `🎛️ /menu — show quick-action buttons`,
+    `📋 /history — last 5 feeds & nappy changes\n` +
+    `🎛️ /menu — show quick-action buttons\n` +
+    `🔗 /share — generate a link code to share with your partner\n` +
+    `🔗 /join <code> — join your partner's shared tracker`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -157,13 +162,41 @@ bot.command('nappy', async (ctx) => {
 bot.command('status', async (ctx) => {
   conv.delete(ctx.chat.id);
   await registerChat(ctx.chat.id);
-  await sendStatus(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
 });
 
 bot.command('history', async (ctx) => {
   conv.delete(ctx.chat.id);
   await registerChat(ctx.chat.id);
-  await sendHistory(ctx.chat.id, (text, extra) => ctx.reply(text, extra));
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+});
+
+bot.command('share', async (ctx) => {
+  await registerChat(ctx.chat.id);
+  const code = await createLinkCode(ctx.chat.id);
+  await ctx.reply(
+    `🔗 Your link code is: *${code}*\n\nAsk your partner to send the bot:\n/join ${code}\n\nThe code expires after one use.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('join', async (ctx) => {
+  await registerChat(ctx.chat.id);
+  const code = ctx.match.trim();
+  if (!code) {
+    await ctx.reply('Please provide a code: /join ABC123');
+    return;
+  }
+  const primaryId = await linkChat(ctx.chat.id, code);
+  if (!primaryId) {
+    await ctx.reply('❌ Invalid or expired code. Ask your partner to send /share again.');
+    return;
+  }
+  await ctx.reply("✅ You're now linked! You and your partner share the same baby tracker.", {
+    reply_markup: menuKeyboard(),
+  });
 });
 
 // --- Inline button: Fed now ---
@@ -191,7 +224,7 @@ bot.callbackQuery(/^feed_ml:(\d+)$/, async (ctx) => {
   );
 });
 
-// --- Inline button: Nappy type (now asks for time) ---
+// --- Inline button: Nappy type (asks for time) ---
 
 bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
   const chatId = getChatId(ctx);
@@ -234,16 +267,22 @@ bot.callbackQuery('cancel', async (ctx) => {
 bot.callbackQuery('menu:status', async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = getChatId(ctx);
-  if (chatId) await sendStatus(chatId, (text, extra) => ctx.reply(text, extra));
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
 });
 
 bot.callbackQuery('menu:history', async (ctx) => {
   await ctx.answerCallbackQuery();
   const chatId = getChatId(ctx);
-  if (chatId) await sendHistory(chatId, (text, extra) => ctx.reply(text, extra));
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
 });
 
-// --- Text input handler (for custom ml or HH:MM time) ---
+// --- Text input handler (custom ml or HH:MM time) ---
 
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
@@ -294,13 +333,15 @@ async function finishLog(
   const timeSuffix = isNow ? '' : ` at ${formatTime(loggedAt)}`;
 
   if (state.step === 'feed_time' && state.amountMl != null) {
-    await logFeed(chatId, state.amountMl, loggedAt);
+    const primaryId = await resolvePrimaryChat(chatId);
+    await logFeed(primaryId, state.amountMl, loggedAt);
     await reply(`✅ 🍼 Reuben had ${state.amountMl}ml${timeSuffix}`, {
       reply_markup: menuKeyboard(),
     });
   } else if (state.step === 'nappy_time' && state.nappyType) {
+    const primaryId = await resolvePrimaryChat(chatId);
     const emoji = NAPPY_EMOJI[state.nappyType] ?? '🚼';
-    await logNappy(chatId, state.nappyType, loggedAt);
+    await logNappy(primaryId, state.nappyType, loggedAt);
     await reply(`✅ ${emoji} Nappy change logged (${state.nappyType})${timeSuffix}`, {
       reply_markup: menuKeyboard(),
     });
@@ -371,17 +412,27 @@ async function sendHistory(
   );
 }
 
-// --- 3-hour feeding reminder ---
+// --- Feeding reminders (checks every 5 minutes) ---
 
 cron.schedule('*/5 * * * *', async () => {
   const chats = await getAllChats();
+
   for (const chatId of chats) {
-    const lastFeed = await getLastFeed(chatId);
+    const primaryId = await resolvePrimaryChat(chatId);
+    const lastFeed = await getLastFeed(primaryId);
     if (!lastFeed) continue;
+
     const msSince = Date.now() - new Date(lastFeed.logged_at).getTime();
+    const twoHalfHours = 2.5 * 60 * 60 * 1000;
     const threeHours = 3 * 60 * 60 * 1000;
     const fiveMinutes = 5 * 60 * 1000;
-    if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
+
+    if (msSince >= twoHalfHours && msSince < twoHalfHours + fiveMinutes) {
+      await bot.api.sendMessage(
+        chatId,
+        `🍼 Time to prepare milk! Reuben's next feed is in 30 minutes.`
+      );
+    } else if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
       await bot.api.sendMessage(
         chatId,
         `⏰ Time to feed Reuben! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
@@ -403,6 +454,8 @@ async function main() {
     { command: 'status',  description: '📊 Show last feed & nappy' },
     { command: 'history', description: '📋 Show last 5 feeds & nappy changes' },
     { command: 'menu',    description: '🎛️ Show quick-action buttons' },
+    { command: 'share',   description: '🔗 Generate a code to share with your partner' },
+    { command: 'join',    description: "🔗 Join your partner's shared tracker" },
     { command: 'help',    description: '❓ Show all commands' },
   ]);
   console.log('Commands registered');
