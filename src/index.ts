@@ -123,7 +123,10 @@ const conv = new Map<number, ConvState>();
 const MAX_BACKDATE_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 function parseHHMM(text: string): Date | null {
-  const match = text.trim().match(/^(\d{1,2}):(\d{2})$/);
+  // Normalize full-width colon (iOS autocorrect) and make separator optional
+  // so both "13:45" and "1345" are accepted.
+  const normalized = text.trim().replace(/：/g, ':');
+  const match = normalized.match(/^(\d{1,2}):?(\d{2})$/);
   if (!match) return null;
   const h = parseInt(match[1], 10);
   const m = parseInt(match[2], 10);
