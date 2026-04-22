@@ -121,10 +121,11 @@ const conv = new Map<number, ConvState>();
 // ============================================================
 
 const MAX_BACKDATE_MS = 12 * 60 * 60 * 1000; // 12 hours
+const SGT_OFFSET_MS  = 8 * 60 * 60 * 1000;  // UTC+8
 
+// Parses HH:MM (or HHMM) as Singapore time (UTC+8) and returns a UTC Date.
+// Accepts the standard colon, the full-width colon ：(iOS autocorrect), or no separator.
 function parseHHMM(text: string): Date | null {
-  // Normalize full-width colon (iOS autocorrect) and make separator optional
-  // so both "13:45" and "1345" are accepted.
   const normalized = text.trim().replace(/：/g, ':');
   const match = normalized.match(/^(\d{1,2}):?(\d{2})$/);
   if (!match) return null;
@@ -132,16 +133,22 @@ function parseHHMM(text: string): Date | null {
   const m = parseInt(match[2], 10);
   if (h > 23 || m > 59) return null;
 
-  const result = new Date();
-  result.setHours(h, m, 0, 0);
+  const nowUtc = Date.now();
+  // Work in SGT by shifting 'now' forward 8 hours, treating it as UTC
+  const nowSgt = new Date(nowUtc + SGT_OFFSET_MS);
+  const candidate = new Date(nowSgt);
+  candidate.setUTCHours(h, m, 0, 0);
 
-  // If time is in the future, assume it was yesterday
-  if (result.getTime() > Date.now() + 60_000) result.setDate(result.getDate() - 1);
+  // If the candidate is in the future (SGT), it must be from yesterday
+  if (candidate.getTime() > nowSgt.getTime() + 60_000) {
+    candidate.setUTCDate(candidate.getUTCDate() - 1);
+  }
 
-  // Reject times more than 12 hours in the past
-  if (result.getTime() < Date.now() - MAX_BACKDATE_MS) return null;
+  // Shift back to actual UTC
+  const utcDate = new Date(candidate.getTime() - SGT_OFFSET_MS);
 
-  return result;
+  if (nowUtc - utcDate.getTime() > MAX_BACKDATE_MS) return null;
+  return utcDate;
 }
 
 function formatAgo(date: Date): string {
@@ -154,8 +161,9 @@ function formatAgo(date: Date): string {
 }
 
 function formatTime(date: Date): string {
-  const h = date.getHours().toString().padStart(2, '0');
-  const m = date.getMinutes().toString().padStart(2, '0');
+  const sgt = new Date(date.getTime() + SGT_OFFSET_MS);
+  const h = sgt.getUTCHours().toString().padStart(2, '0');
+  const m = sgt.getUTCMinutes().toString().padStart(2, '0');
   return `${h}:${m}`;
 }
 
