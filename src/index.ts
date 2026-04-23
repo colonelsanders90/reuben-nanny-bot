@@ -20,7 +20,7 @@ import {
   VALID_NAPPY_TYPES,
 } from './db';
 
-const TZ = process.env.TIMEZONE ?? 'UTC';
+const TZ = process.env.TIMEZONE ?? 'Asia/Singapore';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
