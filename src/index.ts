@@ -11,12 +11,16 @@ import {
   getLastNappy,
   getRecentFeeds,
   getRecentNappies,
+  getFeedsForDay,
+  getNappiesForDay,
   getAllChats,
   resolvePrimaryChat,
   createLinkCode,
   linkChat,
   VALID_NAPPY_TYPES,
 } from './db';
+
+const TZ = process.env.TIMEZONE ?? 'UTC';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -182,6 +186,37 @@ function formatNextFeed(lastFeedTime: Date): string {
   return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
 }
 
+// Returns today's date as YYYY-MM-DD in the configured timezone
+function todayStr(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+}
+
+// Shifts a YYYY-MM-DD string by N days
+function offsetDate(dateStr: string, days: number): string {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// "Wed, 23 Apr 2026"
+function formatDateLabel(dateStr: string): string {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  return d.toLocaleDateString('en-GB', {
+    timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  });
+}
+
+// "23 Apr" for nav buttons
+function formatShortDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  return d.toLocaleDateString('en-GB', { timeZone: TZ, day: 'numeric', month: 'short' });
+}
+
+// "14:30" in the configured timezone
+function formatTimeInTz(date: Date): string {
+  return date.toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 const NAPPY_EMOJI: Record<string, string> = {
   wet: '💧',
   dirty: '💩',
@@ -195,8 +230,9 @@ const NAPPY_EMOJI: Record<string, string> = {
 function menuKeyboard() {
   return new InlineKeyboard()
     .text('🍼 Fed now', 'menu:fed')
-    .text('📊 Status', 'menu:status')
-    .text('📋 History', 'menu:history').row()
+    .text('📊 Status', 'menu:status').row()
+    .text('📋 Last 5', 'menu:last5')
+    .text('📅 Daily', 'menu:daily').row()
     .text('💧 Wet nappy', 'nappy:wet')
     .text('💩 Dirty', 'nappy:dirty')
     .text('💩💧 Both', 'nappy:both');
@@ -245,7 +281,9 @@ bot.command('help', async (ctx) => {
     `🍼 *Feeding:* Tap "Fed now" → pick ml → set time\n` +
     `🚼 *Nappy:* Tap wet/dirty/both → set time\n` +
     `📊 /status — last feed & nappy status\n` +
-    `📋 /history — last 5 feeds & nappy changes\n` +
+    `📋 /last5 — last 5 feeds & nappy changes\n` +
+    `📅 /history — yesterday's full feed log\n` +
+    `📅 /daily — day snapshot with ◀▶ navigation\n` +
     `🎛️ /menu — show quick-action buttons\n` +
     `🔗 /share — generate a link code to share with your partner\n` +
     `🔗 /join <code> — join your partner's shared tracker`,
@@ -284,12 +322,29 @@ bot.command('status', async (ctx) => {
   await sendStatus(primaryId, (text, extra) => ctx.reply(text, extra));
 });
 
+bot.command('last5', async (ctx) => {
+  conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
+  await registerChat(ctx.chat.id);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendLast5(primaryId, (text, extra) => ctx.reply(text, extra));
+});
+
 bot.command('history', async (ctx) => {
   conv.delete(ctx.chat.id);
   if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
-  await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+  const yesterday = offsetDate(todayStr(), -1);
+  await sendDailySnapshot(primaryId, yesterday, (text, extra) => ctx.reply(text, extra));
+});
+
+bot.command('daily', async (ctx) => {
+  conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
+  await registerChat(ctx.chat.id);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendDailySnapshot(primaryId, todayStr(), (text, extra) => ctx.reply(text, extra));
 });
 
 bot.command('share', async (ctx) => {
@@ -405,13 +460,35 @@ bot.callbackQuery('menu:status', async (ctx) => {
   }
 });
 
-bot.callbackQuery('menu:history', async (ctx) => {
+bot.callbackQuery('menu:last5', async (ctx) => {
   if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery();
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
-    await sendHistory(primaryId, (text, extra) => ctx.reply(text, extra));
+    await sendLast5(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
+});
+
+bot.callbackQuery('menu:daily', async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery();
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendDailySnapshot(primaryId, todayStr(), (text, extra) => ctx.reply(text, extra));
+  }
+});
+
+bot.callbackQuery(/^daily:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery();
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendDailySnapshot(primaryId, ctx.match[1], (text, extra) =>
+      ctx.editMessageText(text, extra)
+    );
   }
 });
 
@@ -524,12 +601,12 @@ async function sendStatus(
 }
 
 // ============================================================
-// History helper
+// Last 5 helper
 // ============================================================
 
-async function sendHistory(
+async function sendLast5(
   chatId: number,
-  reply: (text: string, extra?: { reply_markup: InlineKeyboard }) => Promise<unknown>
+  reply: (text: string, extra?: any) => Promise<unknown>
 ) {
   const [feeds, nappies] = await Promise.all([
     getRecentFeeds(chatId, 5),
@@ -537,23 +614,72 @@ async function sendHistory(
   ]);
 
   const feedLines = feeds.length
-    ? feeds.map((f) => {
-        const t = formatTime(new Date(f.logged_at));
-        return `  🍼 ${f.amount_ml}ml — ${formatAgo(new Date(f.logged_at))} (${t})`;
-      }).join('\n')
+    ? feeds.map((f) => `  🍼 ${f.amount_ml}ml — ${formatAgo(new Date(f.logged_at))} (${formatTimeInTz(new Date(f.logged_at))})`).join('\n')
     : '  No feeds logged yet';
 
   const nappyLines = nappies.length
-    ? nappies.map((n) => {
-        const t = formatTime(new Date(n.logged_at));
-        return `  ${NAPPY_EMOJI[n.nappy_type] ?? '🚼'} ${n.nappy_type} — ${formatAgo(new Date(n.logged_at))} (${t})`;
-      }).join('\n')
+    ? nappies.map((n) => `  ${NAPPY_EMOJI[n.nappy_type] ?? '🚼'} ${n.nappy_type} — ${formatAgo(new Date(n.logged_at))} (${formatTimeInTz(new Date(n.logged_at))})`).join('\n')
     : '  No nappy changes logged yet';
 
   await reply(
     `📋 Last 5 feeds:\n${feedLines}\n\n📋 Last 5 nappy changes:\n${nappyLines}`,
     { reply_markup: menuKeyboard() }
   );
+}
+
+// ============================================================
+// Daily snapshot helper
+// ============================================================
+
+async function sendDailySnapshot(
+  chatId: number,
+  dateStr: string,
+  reply: (text: string, extra?: any) => Promise<unknown>
+) {
+  const today = todayStr();
+  const [feeds, nappies] = await Promise.all([
+    getFeedsForDay(chatId, dateStr, TZ),
+    getNappiesForDay(chatId, dateStr, TZ),
+  ]);
+
+  const isToday = dateStr === today;
+  const label   = isToday ? `Today — ${formatDateLabel(dateStr)}` : formatDateLabel(dateStr);
+
+  let text = `📅 <b>${label}</b>\n`;
+
+  if (feeds.length) {
+    const totalMl = feeds.reduce((sum: number, f: any) => sum + f.amount_ml, 0);
+    text += `\n🍼 <b>Feeds</b> — ${feeds.length} total · ${totalMl}ml\n<code>`;
+    for (const f of feeds) {
+      text += `${formatTimeInTz(new Date(f.logged_at))}  ${String(f.amount_ml).padStart(3)}ml\n`;
+    }
+    text += '</code>';
+  } else {
+    text += '\n🍼 No feeds logged\n';
+  }
+
+  if (nappies.length) {
+    text += `\n🚼 <b>Nappies</b> — ${nappies.length} changes\n<code>`;
+    for (const n of nappies) {
+      text += `${formatTimeInTz(new Date(n.logged_at))}  ${(NAPPY_EMOJI[n.nappy_type] ?? '') + ' ' + n.nappy_type}\n`;
+    }
+    text += '</code>';
+  } else {
+    text += '\n🚼 No nappy changes logged\n';
+  }
+
+  // Navigation buttons — never go into the future
+  const prevDate = offsetDate(dateStr, -1);
+  const nextDate = offsetDate(dateStr, 1);
+
+  const kb = new InlineKeyboard()
+    .text(`◀ ${formatShortDate(prevDate)}`, `daily:${prevDate}`);
+
+  if (nextDate <= today) {
+    kb.text(`${formatShortDate(nextDate)} ▶`, `daily:${nextDate}`);
+  }
+
+  await reply(text, { parse_mode: 'HTML', reply_markup: kb });
 }
 
 // ============================================================
@@ -627,8 +753,10 @@ async function main() {
   await bot.api.setMyCommands([
     { command: 'fed',     description: '🍼 Log a feed' },
     { command: 'nappy',   description: '🚼 Log a nappy change' },
-    { command: 'status',  description: '📊 Show last feed & nappy' },
-    { command: 'history', description: '📋 Show last 5 feeds & nappy changes' },
+    { command: 'status',  description: '📊 Last feed & nappy' },
+    { command: 'last5',   description: '📋 Last 5 feeds & nappy changes' },
+    { command: 'history', description: '📅 Yesterday\'s full feed log' },
+    { command: 'daily',   description: '📅 Day snapshot with navigation' },
     { command: 'menu',    description: '🎛️ Show quick-action buttons' },
     { command: 'share',   description: '🔗 Generate a code to share with your partner' },
     { command: 'join',    description: "🔗 Join your partner's shared tracker" },

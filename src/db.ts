@@ -152,6 +152,30 @@ export async function getRecentNappies(chatId: number, limit = 3) {
   return result.rows;
 }
 
+export async function getFeedsForDay(chatId: number, dateStr: string, tz: string) {
+  const result = await pool.query(
+    `SELECT * FROM events
+     WHERE chat_id = $1
+       AND type = 'feed'
+       AND (logged_at AT TIME ZONE $3)::date = $2::date
+     ORDER BY logged_at ASC`,
+    [chatId, dateStr, tz]
+  );
+  return result.rows;
+}
+
+export async function getNappiesForDay(chatId: number, dateStr: string, tz: string) {
+  const result = await pool.query(
+    `SELECT * FROM events
+     WHERE chat_id = $1
+       AND type = 'nappy'
+       AND (logged_at AT TIME ZONE $3)::date = $2::date
+     ORDER BY logged_at ASC`,
+    [chatId, dateStr, tz]
+  );
+  return result.rows;
+}
+
 export async function getAllChats(): Promise<number[]> {
   const result = await pool.query('SELECT chat_id FROM chats');
   return result.rows.map((r) => Number(r.chat_id));
