@@ -240,14 +240,16 @@ function menuKeyboard() {
 
 function mlKeyboard() {
   return new InlineKeyboard()
-    .text('80ml', 'feed_ml:80').text('100ml', 'feed_ml:100')
-    .text('120ml', 'feed_ml:120').text('150ml', 'feed_ml:150').row()
+    .text('90ml', 'feed_ml:90').text('100ml', 'feed_ml:100')
+    .text('110ml', 'feed_ml:110').text('120ml', 'feed_ml:120').row()
     .text('❌ Cancel', 'cancel');
 }
 
 function timeKeyboard() {
   return new InlineKeyboard()
     .text('✅ Just now', 'time:now').row()
+    .text('10m ago', 'time:10').text('20m ago', 'time:20').text('30m ago', 'time:30').row()
+    .text('40m ago', 'time:40').text('50m ago', 'time:50').text('60m ago', 'time:60').row()
     .text('❌ Cancel', 'cancel');
 }
 
@@ -429,7 +431,7 @@ bot.callbackQuery(/^nappy:(.+)$/, async (ctx) => {
   );
 });
 
-bot.callbackQuery('time:now', async (ctx) => {
+bot.callbackQuery(/^time:(now|\d+)$/, async (ctx) => {
   if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
   const state = conv.get(chatId);
@@ -438,7 +440,11 @@ bot.callbackQuery('time:now', async (ctx) => {
     await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() });
     return;
   }
-  await finishLog(chatId, state, new Date(), (text, extra) =>
+  const val = ctx.match[1];
+  const loggedAt = val === 'now'
+    ? new Date()
+    : new Date(Date.now() - parseInt(val, 10) * 60_000);
+  await finishLog(chatId, state, loggedAt, (text, extra) =>
     ctx.editMessageText(text, extra)
   );
 });
