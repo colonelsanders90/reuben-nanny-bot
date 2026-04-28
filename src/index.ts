@@ -607,8 +607,15 @@ async function sendStatus(
 }
 
 // ============================================================
-// Last 5 helper
-// ============================================================
+function formatDelta(olderDate: Date, newerDate: Date): string {
+  const totalMins = Math.floor((newerDate.getTime() - olderDate.getTime()) / 60_000);
+  if (totalMins < 60) return `+${totalMins}m`;
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  return m > 0 ? `+${h}h ${m}m` : `+${h}h`;
+}
+
+
 
 async function sendLast5(
   chatId: number,
@@ -620,7 +627,12 @@ async function sendLast5(
   ]);
 
   const feedLines = feeds.length
-    ? feeds.map((f) => `  🍼 ${f.amount_ml}ml — ${formatAgo(new Date(f.logged_at))} (${formatTimeInTz(new Date(f.logged_at))})`).join('\n')
+    ? feeds.map((f, i) => {
+        const delta = i < feeds.length - 1
+          ? `  ↑ ${formatDelta(new Date(feeds[i + 1].logged_at), new Date(f.logged_at))}`
+          : '';
+        return `  🍼 ${f.amount_ml}ml · ${formatTimeInTz(new Date(f.logged_at))} · ${formatAgo(new Date(f.logged_at))}${delta}`;
+      }).join('\n')
     : '  No feeds logged yet';
 
   const nappyLines = nappies.length
