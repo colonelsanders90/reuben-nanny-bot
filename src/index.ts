@@ -19,6 +19,8 @@ import {
   resolvePrimaryChat,
   createLinkCode,
   linkChat,
+  getBabyName,
+  setBabyName,
   VALID_NAPPY_TYPES,
 } from './db';
 
@@ -118,9 +120,22 @@ async function guard(ctx: any, rateLimitKey?: string): Promise<boolean> {
 // Conversation state (per chat)
 // ============================================================
 
-type ConvStep = 'feed_ml' | 'feed_time' | 'nappy_time';
+type ConvStep = 'baby_name' | 'feed_ml' | 'feed_time' | 'nappy_time';
 interface ConvState { step: ConvStep; amountMl?: number; nappyType?: string; }
 const conv = new Map<number, ConvState>();
+
+// ============================================================
+// Baby name cache (keyed by primary chat ID)
+// ============================================================
+
+const babyNameCache = new Map<number, string>();
+
+async function getCachedBabyName(primaryId: number): Promise<string | null> {
+  if (babyNameCache.has(primaryId)) return babyNameCache.get(primaryId)!;
+  const name = await getBabyName(primaryId);
+  if (name) babyNameCache.set(primaryId, name);
+  return name;
+}
 
 // ============================================================
 // Time helpers
@@ -268,7 +283,14 @@ bot.command('start', async (ctx) => {
   conv.delete(ctx.chat.id);
   if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
-  await ctx.reply('👶 Reuben Nanny Bot ready! What do you need?', {
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  const name = await getCachedBabyName(primaryId);
+  if (!name) {
+    conv.set(ctx.chat.id, { step: 'baby_name' });
+    await ctx.reply("👶 Welcome to Nanny Bot!\n\nWhat's your baby's name?");
+    return;
+  }
+  await ctx.reply(`👶 ${name} Nanny Bot ready! What do you need?`, {
     reply_markup: menuKeyboard(),
   });
 });
@@ -301,8 +323,10 @@ bot.command('fed', async (ctx) => {
   conv.delete(ctx.chat.id);
   if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  const babyName = await getCachedBabyName(primaryId) ?? 'baby';
   conv.set(ctx.chat.id, { step: 'feed_ml' });
-  await ctx.reply('How many ml did Reuben have?\n\nTap a quick amount or type a number:', {
+  await ctx.reply(`How many ml did ${babyName} have?\n\nTap a quick amount or type a number:`, {
     reply_markup: mlKeyboard(),
   });
 });
@@ -405,9 +429,11 @@ bot.callbackQuery('menu:fed', async (ctx) => {
   if (!await guard(ctx)) return;
   const chatId = getChatId(ctx);
   await registerChat(chatId);
+  const primaryId = await resolvePrimaryChat(chatId);
+  const babyName = await getCachedBabyName(primaryId) ?? 'baby';
   conv.set(chatId, { step: 'feed_ml' });
   await ctx.answerCallbackQuery();
-  await ctx.reply('How many ml did Reuben have?\n\nTap a quick amount or type a number:', {
+  await ctx.reply(`How many ml did ${babyName} have?\n\nTap a quick amount or type a number:`, {
     reply_markup: mlKeyboard(),
   });
 });
@@ -590,6 +616,22 @@ bot.on('message:text', async (ctx) => {
 
   if (!await guard(ctx)) return;
 
+  if (state.step === 'baby_name') {
+    const name = text.slice(0, 50).trim();
+    if (!name) {
+      await ctx.reply("Please enter a name for your baby:");
+      return;
+    }
+    const primaryId = await resolvePrimaryChat(chatId);
+    await setBabyName(primaryId, name);
+    babyNameCache.set(primaryId, name);
+    conv.delete(chatId);
+    await ctx.reply(`👶 ${name} Nanny Bot is ready! What do you need?`, {
+      reply_markup: menuKeyboard(),
+    });
+    return;
+  }
+
   if (state.step === 'feed_ml') {
     const n = parseInt(text, 10);
     if (isNaN(n) || n <= 0 || n > 600) {
@@ -635,8 +677,9 @@ async function finishLog(
 
   if (state.step === 'feed_time' && state.amountMl != null) {
     const primaryId = await resolvePrimaryChat(chatId);
+    const babyName = await getCachedBabyName(primaryId) ?? 'baby';
     await logFeed(primaryId, state.amountMl, loggedAt);
-    await reply(`✅ 🍼 Reuben had ${state.amountMl}ml${timeSuffix}`, {
+    await reply(`✅ 🍼 ${babyName} had ${state.amountMl}ml${timeSuffix}`, {
       reply_markup: menuKeyboard(),
     });
   } else if (state.step === 'nappy_time' && state.nappyType) {
@@ -832,15 +875,16 @@ cron.schedule('*/5 * * * *', async () => {
       const threeHours   = 3 * 60 * 60 * 1000;
       const fiveMinutes  = 5 * 60 * 1000;
 
+      const babyName = await getCachedBabyName(primaryId) ?? 'baby';
       if (msSince >= twoHalfHours && msSince < twoHalfHours + fiveMinutes) {
         await bot.api.sendMessage(
           chatId,
-          `🍼 Time to prepare milk! Reuben's next feed is in 30 minutes.`
+          `🍼 Time to prepare milk! ${babyName}'s next feed is in 30 minutes.`
         );
       } else if (msSince >= threeHours && msSince < threeHours + fiveMinutes) {
         await bot.api.sendMessage(
           chatId,
-          `⏰ Time to feed Reuben! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
+          `⏰ Time to feed ${babyName}! Last fed ${lastFeed.amount_ml}ml — ${formatAgo(new Date(lastFeed.logged_at))}`,
           { reply_markup: menuKeyboard() }
         );
       }
@@ -892,7 +936,7 @@ async function main() {
   console.log('Commands registered');
 
   bot.start();
-  console.log('Reuben Nanny Bot running');
+  console.log('Nanny Bot running');
 }
 
 // Global error handler — prevents any single bad update from crashing the bot

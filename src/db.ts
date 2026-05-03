@@ -31,6 +31,7 @@ export async function initDb() {
       primary_chat_id BIGINT NOT NULL
     );
     ALTER TABLE chats ADD COLUMN IF NOT EXISTS authorized BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE chats ADD COLUMN IF NOT EXISTS baby_name VARCHAR(50);
   `);
 }
 
@@ -192,6 +193,22 @@ export async function getNappiesForDay(chatId: number, dateStr: string, tz: stri
     [chatId, dateStr, tz]
   );
   return result.rows;
+}
+
+export async function getBabyName(chatId: number): Promise<string | null> {
+  const result = await pool.query(
+    'SELECT baby_name FROM chats WHERE chat_id = $1',
+    [chatId]
+  );
+  return result.rows[0]?.baby_name ?? null;
+}
+
+export async function setBabyName(chatId: number, name: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO chats (chat_id, baby_name) VALUES ($1, $2)
+     ON CONFLICT (chat_id) DO UPDATE SET baby_name = EXCLUDED.baby_name`,
+    [chatId, name.trim().slice(0, 50)]
+  );
 }
 
 export async function getAllChats(): Promise<number[]> {
