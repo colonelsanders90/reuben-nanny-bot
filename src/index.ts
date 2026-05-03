@@ -1,4 +1,5 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
+import { generateTrendsImage, DayStats } from './charts';
 import cron from 'node-cron';
 import {
   initDb,
@@ -21,6 +22,7 @@ import {
   linkChat,
   getBabyName,
   setBabyName,
+  getEventSummaryByDay,
   VALID_NAPPY_TYPES,
 } from './db';
 
@@ -251,6 +253,7 @@ function menuKeyboard() {
     .text('📋 Last 5', 'menu:last5')
     .text('📅 Daily', 'menu:daily')
     .text('🗑️ Delete', 'menu:delete').row()
+    .text('📈 Trends', 'menu:trends').row()
     .text('💧 Wet nappy', 'nappy:wet')
     .text('💩 Dirty', 'nappy:dirty')
     .text('💩💧 Both', 'nappy:both');
@@ -383,6 +386,15 @@ bot.command('delete', async (ctx) => {
   await registerChat(ctx.chat.id);
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
   await sendDeleteList(primaryId, (text, extra) => ctx.reply(text, extra));
+});
+
+bot.command('trends', async (ctx) => {
+  conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
+  await ctx.replyWithChatAction('upload_photo');
+  await registerChat(ctx.chat.id);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendTrends(ctx.chat.id, primaryId);
 });
 
 bot.command('share', async (ctx) => {
@@ -531,6 +543,16 @@ bot.callbackQuery('menu:delete', async (ctx) => {
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
     await sendDeleteList(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
+});
+
+bot.callbackQuery('menu:trends', async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery('Generating chart…');
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendTrends(chatId, primaryId);
   }
 });
 
@@ -852,6 +874,48 @@ async function sendDailySnapshot(
 }
 
 // ============================================================
+// Trends helper
+// ============================================================
+
+const TRENDS_WEEKS = 8;
+const TRENDS_DAYS  = TRENDS_WEEKS * 7;  // 56
+
+async function sendTrends(chatId: number, primaryId: number) {
+  const babyName = await getCachedBabyName(primaryId) ?? 'Baby';
+  const toDate   = todayStr();
+  const fromDate = offsetDate(toDate, -(TRENDS_DAYS - 1));
+
+  const rows = await getEventSummaryByDay(primaryId, fromDate, toDate, TZ);
+
+  const dayData = new Map<string, DayStats>();
+  for (const row of rows) {
+    dayData.set(row.day, {
+      feedMl:     Number(row.total_ml),
+      nappyCount: Number(row.nappy_count),
+    });
+  }
+
+  const imgBuf = await generateTrendsImage(dayData, babyName, toDate, TZ);
+
+  // 7-day summary stats for the photo caption
+  const last7 = Array.from({ length: 7 }, (_, i) => offsetDate(toDate, i - 6));
+  const weekTotalMl    = last7.reduce((s, d) => s + (dayData.get(d)?.feedMl     ?? 0), 0);
+  const weekTotalNappy = last7.reduce((s, d) => s + (dayData.get(d)?.nappyCount ?? 0), 0);
+  const daysWithFeeds  = last7.filter(d => (dayData.get(d)?.feedMl ?? 0) > 0).length;
+  const avgMl = daysWithFeeds > 0 ? Math.round(weekTotalMl / daysWithFeeds) : 0;
+
+  const caption =
+    `📈 ${babyName}'s activity — last ${TRENDS_WEEKS} weeks\n\n` +
+    `🍼 Past 7 days: ${weekTotalMl} ml total · avg ${avgMl} ml/day\n` +
+    `🚼 Past 7 days: ${weekTotalNappy} nappy change${weekTotalNappy !== 1 ? 's' : ''}`;
+
+  await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'trends.png'), {
+    caption,
+    reply_markup: menuKeyboard(),
+  });
+}
+
+// ============================================================
 // Feeding reminders (checks every 5 minutes)
 // ============================================================
 
@@ -928,6 +992,7 @@ async function main() {
     { command: 'history', description: '📅 Yesterday\'s full feed log' },
     { command: 'daily',   description: '📅 Day snapshot with navigation' },
     { command: 'delete',  description: '🗑️ Delete a recent entry' },
+    { command: 'trends',  description: '📈 Activity heatmap — last 8 weeks' },
     { command: 'menu',    description: '🎛️ Show quick-action buttons' },
     { command: 'share',   description: '🔗 Generate a code to share with your partner' },
     { command: 'join',    description: "🔗 Join your partner's shared tracker" },

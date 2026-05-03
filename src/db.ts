@@ -211,6 +211,28 @@ export async function setBabyName(chatId: number, name: string): Promise<void> {
   );
 }
 
+export async function getEventSummaryByDay(
+  chatId: number,
+  fromDateStr: string,
+  toDateStr: string,
+  tz: string
+): Promise<Array<{ day: string; total_ml: number; nappy_count: number }>> {
+  const result = await pool.query(
+    `SELECT
+       ((logged_at AT TIME ZONE $4)::date)::text                                AS day,
+       COALESCE(SUM(CASE WHEN type = 'feed' THEN amount_ml ELSE 0 END), 0)::int AS total_ml,
+       COUNT(CASE WHEN type = 'nappy' THEN 1 END)::int                          AS nappy_count
+     FROM events
+     WHERE chat_id = $1
+       AND (logged_at AT TIME ZONE $4)::date >= $2::date
+       AND (logged_at AT TIME ZONE $4)::date <= $3::date
+     GROUP BY (logged_at AT TIME ZONE $4)::date
+     ORDER BY day ASC`,
+    [chatId, fromDateStr, toDateStr, tz]
+  );
+  return result.rows;
+}
+
 export async function getAllChats(): Promise<number[]> {
   const result = await pool.query('SELECT chat_id FROM chats');
   return result.rows.map((r) => Number(r.chat_id));
