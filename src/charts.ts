@@ -47,8 +47,8 @@ const H = PAD + HEADER_H + SECTION_H + SEC_GAP + SECTION_H + PAD;
 //      = 20 + 36 + 318 + 22 + 318 + 20 = 734
 
 // ── Colour palettes ───────────────────────────────────────────────────────────
-const BLUE  = ['#ebedf0', '#c6e0f5', '#79c0e0', '#1f8fcb', '#0a5680'];
-const GREEN = ['#ebedf0', '#c8e6c9', '#81c784', '#388e3c', '#1b5e20'];
+const CREAM = ['#edebe6', '#fdf4d3', '#f9e080', '#f0b830', '#c88a0a'];
+const BROWN = ['#edebe6', '#e8cfad', '#c49060', '#906038', '#5a3318'];
 
 const BG      = '#ffffff';
 const TEXT_DK = '#24292e';
@@ -238,13 +238,13 @@ export async function generateTrendsImage(
   renderSection(
     sec1Y,
     'Feeds  (ml / day)',
-    v => v.feedMl, maxMl, BLUE,
+    v => v.feedMl, maxMl, CREAM,
     maxMl > 0 ? `${maxMl} ml` : 'none yet'
   );
   renderSection(
     sec2Y,
     'Nappies  (changes / day)',
-    v => v.nappyCount, maxNappy, GREEN,
+    v => v.nappyCount, maxNappy, BROWN,
     maxNappy > 0 ? String(maxNappy) : 'none yet'
   );
 
