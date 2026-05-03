@@ -503,7 +503,11 @@ bot.callbackQuery('cancel', async (ctx) => {
   const chatId = getChatId(ctx);
   conv.delete(chatId);
   await ctx.answerCallbackQuery('Cancelled');
-  await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() });
+  try {
+    await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() });
+  } catch (err: any) {
+    if (!err?.description?.includes('message is not modified')) throw err;
+  }
 });
 
 bot.callbackQuery('menu:status', async (ctx) => {
@@ -542,7 +546,9 @@ bot.callbackQuery('menu:delete', async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
-    await sendDeleteList(primaryId, (text, extra) => ctx.reply(text, extra));
+    // Edit the existing message (not a new reply) so the whole delete flow
+    // stays on one message and cancel/close can reliably edit it back.
+    await sendDeleteList(primaryId, (text, extra) => ctx.editMessageText(text, extra));
   }
 });
 
@@ -604,7 +610,11 @@ bot.callbackQuery('delcancel', async (ctx) => {
   await ctx.answerCallbackQuery('Cancelled');
   const chatId = getChatId(ctx);
   const primaryId = await resolvePrimaryChat(chatId);
-  await sendDeleteList(primaryId, (text, extra) => ctx.editMessageText(text, extra));
+  try {
+    await sendDeleteList(primaryId, (text, extra) => ctx.editMessageText(text, extra));
+  } catch (err: any) {
+    if (!err?.description?.includes('message is not modified')) throw err;
+  }
 });
 
 bot.callbackQuery(/^daily:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
@@ -785,7 +795,7 @@ async function sendDeleteList(
       kb.text(`${emoji} ${e.nappy_type} ${dateLabel} ${time}`, `del:${e.id}`).row();
     }
   }
-  kb.text('❌ Close', 'delcancel');
+  kb.text('❌ Close', 'cancel');
 
   await reply(lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
 }
