@@ -13,6 +13,8 @@ import {
   getRecentNappies,
   getFeedsForDay,
   getNappiesForDay,
+  getRecentEvents,
+  deleteEvent,
   getAllChats,
   resolvePrimaryChat,
   createLinkCode,
@@ -232,7 +234,8 @@ function menuKeyboard() {
     .text('🍼 Fed now', 'menu:fed')
     .text('📊 Status', 'menu:status').row()
     .text('📋 Last 5', 'menu:last5')
-    .text('📅 Daily', 'menu:daily').row()
+    .text('📅 Daily', 'menu:daily')
+    .text('🗑️ Delete', 'menu:delete').row()
     .text('💧 Wet nappy', 'nappy:wet')
     .text('💩 Dirty', 'nappy:dirty')
     .text('💩💧 Both', 'nappy:both');
@@ -286,6 +289,7 @@ bot.command('help', async (ctx) => {
     `📋 /last5 — last 5 feeds & nappy changes\n` +
     `📅 /history — yesterday's full feed log\n` +
     `📅 /daily — day snapshot with ◀▶ navigation\n` +
+    `🗑️ /delete — delete a recent entry\n` +
     `🎛️ /menu — show quick-action buttons\n` +
     `🔗 /share — generate a link code to share with your partner\n` +
     `🔗 /join <code> — join your partner's shared tracker`,
@@ -347,6 +351,14 @@ bot.command('daily', async (ctx) => {
   await registerChat(ctx.chat.id);
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
   await sendDailySnapshot(primaryId, todayStr(), (text, extra) => ctx.reply(text, extra));
+});
+
+bot.command('delete', async (ctx) => {
+  conv.delete(ctx.chat.id);
+  if (!await guard(ctx)) return;
+  await registerChat(ctx.chat.id);
+  const primaryId = await resolvePrimaryChat(ctx.chat.id);
+  await sendDeleteList(primaryId, (text, extra) => ctx.reply(text, extra));
 });
 
 bot.command('share', async (ctx) => {
@@ -486,6 +498,67 @@ bot.callbackQuery('menu:daily', async (ctx) => {
   }
 });
 
+bot.callbackQuery('menu:delete', async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery();
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendDeleteList(primaryId, (text, extra) => ctx.reply(text, extra));
+  }
+});
+
+// Show confirmation before deleting
+bot.callbackQuery(/^del:(\d+)$/, async (ctx) => {
+  if (!await guard(ctx)) return;
+  const id = parseInt(ctx.match[1], 10);
+  const chatId = getChatId(ctx);
+  const primaryId = await resolvePrimaryChat(chatId);
+  const events = await getRecentEvents(primaryId, 20);
+  const event = events.find((e: any) => e.id === id);
+  if (!event) {
+    await ctx.answerCallbackQuery({ text: 'Entry not found', show_alert: true });
+    return;
+  }
+  const label = event.type === 'feed'
+    ? `🍼 ${event.amount_ml}ml at ${formatTimeInTz(new Date(event.logged_at))}`
+    : `${NAPPY_EMOJI[event.nappy_type] ?? '🚼'} ${event.nappy_type} nappy at ${formatTimeInTz(new Date(event.logged_at))}`;
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    `🗑️ Delete this entry?\n\n${label}`,
+    {
+      reply_markup: new InlineKeyboard()
+        .text('✅ Yes, delete', `delconfirm:${id}`)
+        .text('❌ Cancel', 'delcancel'),
+    }
+  );
+});
+
+// Actually delete
+bot.callbackQuery(/^delconfirm:(\d+)$/, async (ctx) => {
+  if (!await guard(ctx)) return;
+  const id = parseInt(ctx.match[1], 10);
+  const chatId = getChatId(ctx);
+  const primaryId = await resolvePrimaryChat(chatId);
+  const deleted = await deleteEvent(id, primaryId);
+  if (!deleted) {
+    await ctx.answerCallbackQuery({ text: 'Entry not found or already deleted', show_alert: true });
+    return;
+  }
+  const label = deleted.type === 'feed'
+    ? `🍼 ${deleted.amount_ml}ml at ${formatTimeInTz(new Date(deleted.logged_at))}`
+    : `${NAPPY_EMOJI[deleted.nappy_type] ?? '🚼'} ${deleted.nappy_type} nappy at ${formatTimeInTz(new Date(deleted.logged_at))}`;
+  await ctx.answerCallbackQuery({ text: 'Deleted ✅' });
+  await ctx.editMessageText(`✅ Deleted: ${label}`, { reply_markup: menuKeyboard() });
+});
+
+bot.callbackQuery('delcancel', async (ctx) => {
+  await ctx.answerCallbackQuery('Cancelled');
+  const chatId = getChatId(ctx);
+  const primaryId = await resolvePrimaryChat(chatId);
+  await sendDeleteList(primaryId, (text, extra) => ctx.editMessageText(text, extra));
+});
+
 bot.callbackQuery(/^daily:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
   if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery();
@@ -621,6 +694,36 @@ function formatDelta(olderDate: Date, newerDate: Date): string {
 }
 
 
+
+async function sendDeleteList(
+  chatId: number,
+  reply: (text: string, extra?: any) => Promise<unknown>
+) {
+  const events = await getRecentEvents(chatId, 8);
+  if (!events.length) {
+    await reply('No entries to delete.', { reply_markup: menuKeyboard() });
+    return;
+  }
+
+  const kb = new InlineKeyboard();
+  const lines: string[] = ['🗑️ <b>Tap an entry to delete it:</b>\n'];
+
+  for (const e of events) {
+    const time = formatTimeInTz(new Date(e.logged_at));
+    const dateLabel = formatShortDate(new Date(e.logged_at).toLocaleDateString('en-CA', { timeZone: TZ }));
+    if (e.type === 'feed') {
+      lines.push(`🍼 ${e.amount_ml}ml — ${dateLabel} ${time}`);
+      kb.text(`🍼 ${e.amount_ml}ml ${dateLabel} ${time}`, `del:${e.id}`).row();
+    } else {
+      const emoji = NAPPY_EMOJI[e.nappy_type] ?? '🚼';
+      lines.push(`${emoji} ${e.nappy_type} — ${dateLabel} ${time}`);
+      kb.text(`${emoji} ${e.nappy_type} ${dateLabel} ${time}`, `del:${e.id}`).row();
+    }
+  }
+  kb.text('❌ Close', 'delcancel');
+
+  await reply(lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
+}
 
 async function sendLast5(
   chatId: number,
@@ -780,6 +883,7 @@ async function main() {
     { command: 'last5',   description: '📋 Last 5 feeds & nappy changes' },
     { command: 'history', description: '📅 Yesterday\'s full feed log' },
     { command: 'daily',   description: '📅 Day snapshot with navigation' },
+    { command: 'delete',  description: '🗑️ Delete a recent entry' },
     { command: 'menu',    description: '🎛️ Show quick-action buttons' },
     { command: 'share',   description: '🔗 Generate a code to share with your partner' },
     { command: 'join',    description: "🔗 Join your partner's shared tracker" },

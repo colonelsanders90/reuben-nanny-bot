@@ -152,6 +152,24 @@ export async function getRecentNappies(chatId: number, limit = 3) {
   return result.rows;
 }
 
+export async function getRecentEvents(chatId: number, limit = 8) {
+  const safeLimit = Math.min(Math.max(1, limit), 20);
+  const result = await pool.query(
+    `SELECT * FROM events WHERE chat_id = $1 ORDER BY logged_at DESC LIMIT $2`,
+    [chatId, safeLimit]
+  );
+  return result.rows;
+}
+
+// Returns the deleted row, or null if not found / not owned by this chat
+export async function deleteEvent(id: number, chatId: number) {
+  const result = await pool.query(
+    `DELETE FROM events WHERE id = $1 AND chat_id = $2 RETURNING *`,
+    [id, chatId]
+  );
+  return result.rows[0] ?? null;
+}
+
 export async function getFeedsForDay(chatId: number, dateStr: string, tz: string) {
   const result = await pool.query(
     `SELECT * FROM events
