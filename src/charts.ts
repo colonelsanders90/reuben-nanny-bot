@@ -1,32 +1,52 @@
-import sharp from 'sharp';
+import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+import { readFileSync } from 'fs';
 
-// ── Layout constants ──────────────────────────────────────────────────────────
-const CELL    = 28;           // cell square size
-const GAP     = 4;            // gap between cells
-const STEP    = CELL + GAP;   // 32 — distance between cell origins
+// ── Font registration (runs once at module load) ──────────────────────────────
+// Bundle Roboto Latin via @fontsource/roboto so we're independent of whatever
+// fonts the server has installed.
+try {
+  GlobalFonts.register(
+    readFileSync(require.resolve('@fontsource/roboto/files/roboto-latin-400-normal.woff2')),
+    'Roboto'
+  );
+  GlobalFonts.register(
+    readFileSync(require.resolve('@fontsource/roboto/files/roboto-latin-700-normal.woff2')),
+    'Roboto'
+  );
+} catch (e) {
+  console.warn('[charts] Roboto font failed to load — text may render as boxes:', (e as Error).message);
+}
 
-const WEEKS   = 8;
-const DAYS    = 7;
+// ── Layout ────────────────────────────────────────────────────────────────────
+const CELL  = 28;
+const GAP   = 4;
+const STEP  = CELL + GAP;  // 32
 
-const GRID_W  = WEEKS * STEP;  // 256
-const GRID_H  = DAYS  * STEP;  // 224
+const WEEKS = 8;
+const DAYS  = 7;
+
+const GRID_W = WEEKS * STEP;  // 256
+const GRID_H = DAYS  * STEP;  // 224
 
 const PAD       = 20;
-const LABEL_W   = 38;          // left column width for day labels
-const TITLE_H   = 20;          // height of section title row
-const WKLBL_H   = 16;          // height of week-date label row
-const LEG_GAP   = 8;           // gap between grid and legend
-const LEG_H     = CELL;        // legend swatch height = cell size
-const SECTION_H = TITLE_H + WKLBL_H + GRID_H + LEG_GAP + LEG_H + 10;
-//              = 20 + 16 + 224 + 8 + 28 + 10 = 306
+const LABEL_W   = 44;   // left margin for day-name labels
+const W         = PAD + LABEL_W + GRID_W + PAD;  // 340
 
-const HEADER_H    = 30;
-const SECTION_GAP = 20;
+const HEADER_H  = 36;   // global header row
+const SEC_TITLE = 24;   // per-section title height
+const WKLBL_H   = 18;   // week-date label row
+const LEG_GAP   = 10;   // space between grid bottom and legend
+const LEG_H     = CELL; // legend swatch height  (= 28)
+const LEG_PAD   = 14;   // padding after legend to next section
 
-const W = PAD + LABEL_W + GRID_W + PAD;                                    // 334
-const H = PAD + HEADER_H + SECTION_H + SECTION_GAP + SECTION_H + PAD;     // 20+30+306+20+306+20 = 702
+const SECTION_H = SEC_TITLE + WKLBL_H + GRID_H + LEG_GAP + LEG_H + LEG_PAD;
+//              = 24 + 18 + 224 + 10 + 28 + 14 = 318
 
-// ── Colour palettes (5 levels: 0=empty → 4=max) ──────────────────────────────
+const SEC_GAP = 22;     // gap between the two heatmap sections
+const H = PAD + HEADER_H + SECTION_H + SEC_GAP + SECTION_H + PAD;
+//      = 20 + 36 + 318 + 22 + 318 + 20 = 734
+
+// ── Colour palettes ───────────────────────────────────────────────────────────
 const BLUE  = ['#ebedf0', '#c6e0f5', '#79c0e0', '#1f8fcb', '#0a5680'];
 const GREEN = ['#ebedf0', '#c8e6c9', '#81c784', '#388e3c', '#1b5e20'];
 
@@ -34,39 +54,42 @@ const BG      = '#ffffff';
 const TEXT_DK = '#24292e';
 const TEXT_LT = '#8b949e';
 
-const FONT = 'DejaVu Sans,Liberation Sans,Helvetica,Arial,sans-serif';
-
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-// Only render labels on Mon, Wed, Fri, Sun to avoid cramping
 const SHOW_DAY   = [true, false, true, false, true, false, true];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function esc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
-/** Map a value to one of the 5 palette levels. Returns palette[0] for zero. */
+/** Map a value to one of the 5 palette levels; always >= level 1 for non-zero. */
 function colorLevel(val: number, max: number, palette: string[]): string {
   if (val === 0 || max === 0) return palette[0];
   const idx = Math.round((val / max) * (palette.length - 1));
   return palette[Math.max(1, Math.min(idx, palette.length - 1))];
 }
 
-function t(
-  x: number, y: number, content: string,
-  opts: { size?: number; weight?: string; fill?: string; anchor?: string } = {}
-): string {
-  const size   = opts.size   ?? 11;
-  const weight = opts.weight ?? 'normal';
-  const fill   = opts.fill   ?? TEXT_DK;
-  const anchor = opts.anchor ?? 'start';
-  return `<text x="${x}" y="${y}" font-family="${FONT}" font-size="${size}" `
-       + `font-weight="${weight}" fill="${fill}" text-anchor="${anchor}">`
-       + `${esc(content)}</text>`;
+/** Draw a filled rounded rectangle, optionally with a stroke outline. */
+function roundRect(
+  ctx: any,
+  x: number, y: number, w: number, h: number, r: number,
+  fill: string, stroke?: string
+) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y,     x + w, y + r,     r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h,     x, y + h - r,     r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y,         x + r, y,         r);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+  }
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -78,14 +101,14 @@ export interface DayStats {
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
- * Generates a PNG image containing two GitHub-style activity heatmaps:
- *   top    = daily ml consumed (blue scale)
- *   bottom = daily nappy changes (green scale)
+ * Returns a PNG Buffer containing two GitHub-style heatmaps stacked vertically:
+ *   top    = daily ml consumed  (white → blue)
+ *   bottom = daily nappy changes (white → green)
  *
- * @param data         Map of YYYY-MM-DD → DayStats
- * @param babyName     Displayed in the header
- * @param todayDateStr 'YYYY-MM-DD' in the configured timezone
- * @param tz           IANA timezone string for date labels
+ * @param data          Map of YYYY-MM-DD → DayStats
+ * @param babyName      Shown in the chart header
+ * @param todayDateStr  Today as 'YYYY-MM-DD' in the local timezone
+ * @param tz            IANA timezone for date labels
  */
 export async function generateTrendsImage(
   data:          Map<string, DayStats>,
@@ -93,131 +116,137 @@ export async function generateTrendsImage(
   todayDateStr:  string,
   tz:            string
 ): Promise<Buffer> {
-  // ── Date alignment ─────────────────────────────────────────────────────────
-  const todayDate = new Date(todayDateStr + 'T12:00:00Z');
-  // 0=Mon … 6=Sun
-  const todayDow  = (todayDate.getUTCDay() + 6) % 7;
+  // ── Date grid alignment ────────────────────────────────────────────────────
+  const todayDate  = new Date(todayDateStr + 'T12:00:00Z');
+  const todayDow   = (todayDate.getUTCDay() + 6) % 7;   // 0 = Mon … 6 = Sun
   const thisMonday = new Date(todayDate);
   thisMonday.setUTCDate(todayDate.getUTCDate() - todayDow);
 
-  // Grid column 0 = Monday of the oldest displayed week
+  // col 0 = Monday of the oldest displayed week
   const gridStart = new Date(thisMonday);
   gridStart.setUTCDate(thisMonday.getUTCDate() - (WEEKS - 1) * 7);
 
-  const cellDateStr = (col: number, row: number): string => {
+  const cellDs = (col: number, row: number): string => {
     const d = new Date(gridStart);
     d.setUTCDate(gridStart.getUTCDate() + col * 7 + row);
     return d.toISOString().slice(0, 10);
   };
-  const cellDate = (col: number, row: number): Date => {
+  const cellDt = (col: number, row: number): Date => {
     const d = new Date(gridStart);
     d.setUTCDate(gridStart.getUTCDate() + col * 7 + row);
     return d;
   };
 
-  // ── Scale values ───────────────────────────────────────────────────────────
+  // ── Scale maxima ───────────────────────────────────────────────────────────
   let maxMl = 0, maxNappy = 0;
   for (const v of data.values()) {
     if (v.feedMl     > maxMl)    maxMl    = v.feedMl;
     if (v.nappyCount > maxNappy) maxNappy = v.nappyCount;
   }
 
-  // ── SVG build ──────────────────────────────────────────────────────────────
-  const el: string[] = [];
-  el.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`);
-  el.push(`<rect width="${W}" height="${H}" rx="10" fill="${BG}"/>`);
+  // ── Canvas ────────────────────────────────────────────────────────────────
+  const canvas = createCanvas(W, H);
+  const ctx    = canvas.getContext('2d') as any;
 
-  // Header
-  el.push(t(PAD, PAD + 18, `${babyName}'s activity — last ${WEEKS} weeks`,
-    { size: 14, weight: '700' }));
+  // Background
+  roundRect(ctx, 0, 0, W, H, 10, BG);
 
-  // ── Section renderer ────────────────────────────────────────────────────────
-  const x0 = PAD + LABEL_W;  // x of grid column 0
+  const x0 = PAD + LABEL_W;  // left edge of grid column 0
 
+  // Global header
+  ctx.fillStyle = TEXT_DK;
+  ctx.font      = 'bold 14px Roboto';
+  ctx.textAlign = 'left';
+  ctx.fillText(`${babyName}’s activity — last ${WEEKS} weeks`, PAD, PAD + 22);
+
+  // ── Per-section renderer ───────────────────────────────────────────────────
   function renderSection(
     sY:       number,
     title:    string,
     getValue: (s: DayStats) => number,
     maxVal:   number,
     palette:  string[],
-    maxLabel: string,
+    maxLabel: string
   ) {
-    const gridY = sY + TITLE_H + WKLBL_H;
+    const gridY = sY + SEC_TITLE + WKLBL_H;
 
-    // Title
-    el.push(t(PAD, sY + 14, title, { size: 12, weight: '600' }));
+    // Section title
+    ctx.font      = 'bold 12px Roboto';
+    ctx.fillStyle = TEXT_DK;
+    ctx.textAlign = 'left';
+    ctx.fillText(title, PAD, sY + 16);
 
-    // Week column date labels (every other column to avoid overlap)
+    // Week-start date labels (every other column to avoid crowding)
+    ctx.font      = '9px Roboto';
+    ctx.fillStyle = TEXT_LT;
     for (let col = 0; col < WEEKS; col += 2) {
-      const lbl = cellDate(col, 0).toLocaleDateString('en-GB', {
+      const lbl = cellDt(col, 0).toLocaleDateString('en-GB', {
         day: 'numeric', month: 'short', timeZone: tz,
       });
-      el.push(t(x0 + col * STEP, sY + TITLE_H + 12, lbl, { size: 9, fill: TEXT_LT }));
+      ctx.textAlign = 'left';
+      ctx.fillText(lbl, x0 + col * STEP, sY + SEC_TITLE + 12);
     }
 
-    // Day-of-week labels + grid cells
+    // Grid rows
     for (let row = 0; row < DAYS; row++) {
+      // Day-name label on the left (Mon / Wed / Fri / Sun)
       if (SHOW_DAY[row]) {
-        el.push(t(
-          x0 - 4, gridY + row * STEP + CELL - 7,
-          DAY_LABELS[row],
-          { size: 9, fill: TEXT_LT, anchor: 'end' }
-        ));
+        ctx.font      = '9px Roboto';
+        ctx.fillStyle = TEXT_LT;
+        ctx.textAlign = 'right';
+        ctx.fillText(DAY_LABELS[row], x0 - 6, gridY + row * STEP + CELL - 7);
       }
+
+      // Heatmap cells
       for (let col = 0; col < WEEKS; col++) {
-        const ds = cellDateStr(col, row);
-        if (ds > todayDateStr) continue;           // no future cells
+        const ds = cellDs(col, row);
+        if (ds > todayDateStr) continue;   // no future cells
 
         const v     = data.get(ds);
         const val   = v ? getValue(v) : 0;
         const fill  = colorLevel(val, maxVal, palette);
         const cx    = x0 + col * STEP;
         const cy    = gridY + row * STEP;
-
-        el.push(`<rect x="${cx}" y="${cy}" width="${CELL}" height="${CELL}" rx="4" fill="${fill}"/>`);
-
-        // Outline today's cell
-        if (ds === todayDateStr) {
-          el.push(`<rect x="${cx}" y="${cy}" width="${CELL}" height="${CELL}" `
-                + `rx="4" fill="none" stroke="${TEXT_DK}" stroke-width="2"/>`);
-        }
+        const today = ds === todayDateStr ? TEXT_DK : undefined;
+        roundRect(ctx, cx, cy, CELL, CELL, 4, fill, today);
       }
     }
 
     // Colour legend
-    const legY  = gridY + GRID_H + LEG_GAP;
-    el.push(t(x0 - 4, legY + CELL - 7, 'Less', { size: 9, fill: TEXT_LT, anchor: 'end' }));
+    const legY = gridY + GRID_H + LEG_GAP;
+
+    ctx.font      = '9px Roboto';
+    ctx.fillStyle = TEXT_LT;
+    ctx.textAlign = 'right';
+    ctx.fillText('Less', x0 - 6, legY + CELL - 7);
+
     for (let i = 0; i < palette.length; i++) {
-      el.push(`<rect x="${x0 + i * (CELL + 3)}" y="${legY}" `
-            + `width="${CELL}" height="${CELL}" rx="3" fill="${palette[i]}"/>`);
+      roundRect(ctx, x0 + i * (CELL + 3), legY, CELL, CELL, 3, palette[i]);
     }
-    el.push(t(
-      x0 + palette.length * (CELL + 3) + 4,
-      legY + CELL - 7,
+
+    ctx.textAlign = 'left';
+    ctx.fillText(
       `More  (max: ${maxLabel})`,
-      { size: 9, fill: TEXT_LT }
-    ));
+      x0 + palette.length * (CELL + 3) + 6,
+      legY + CELL - 7
+    );
   }
 
   const sec1Y = PAD + HEADER_H;
-  const sec2Y = sec1Y + SECTION_H + SECTION_GAP;
+  const sec2Y = sec1Y + SECTION_H + SEC_GAP;
 
-  renderSection(sec1Y,
+  renderSection(
+    sec1Y,
     'Feeds  (ml / day)',
-    v => v.feedMl,
-    maxMl,
-    BLUE,
-    maxMl > 0 ? `${maxMl} ml` : 'none so far'
+    v => v.feedMl, maxMl, BLUE,
+    maxMl > 0 ? `${maxMl} ml` : 'none yet'
   );
-  renderSection(sec2Y,
+  renderSection(
+    sec2Y,
     'Nappies  (changes / day)',
-    v => v.nappyCount,
-    maxNappy,
-    GREEN,
-    maxNappy > 0 ? `${maxNappy}` : 'none so far'
+    v => v.nappyCount, maxNappy, GREEN,
+    maxNappy > 0 ? String(maxNappy) : 'none yet'
   );
 
-  el.push('</svg>');
-
-  return sharp(Buffer.from(el.join(''))).png().toBuffer();
+  return canvas.toBuffer('image/png');
 }
