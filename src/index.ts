@@ -492,9 +492,14 @@ bot.callbackQuery(/^daily:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
-    await sendDailySnapshot(primaryId, ctx.match[1], (text, extra) =>
-      ctx.editMessageText(text, extra)
-    );
+    await sendDailySnapshot(primaryId, ctx.match[1], async (text, extra) => {
+      try {
+        await ctx.editMessageText(text, extra);
+      } catch (err: any) {
+        // Telegram rejects edits when content is unchanged — safe to ignore
+        if (!err?.description?.includes('message is not modified')) throw err;
+      }
+    });
   }
 });
 
@@ -785,5 +790,11 @@ async function main() {
   bot.start();
   console.log('Reuben Nanny Bot running');
 }
+
+// Global error handler — prevents any single bad update from crashing the bot
+bot.catch((err) => {
+  const ctx = err.ctx;
+  console.error(`Error handling update ${ctx.update.update_id}:`, err.error);
+});
 
 main().catch(console.error);
