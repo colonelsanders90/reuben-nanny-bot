@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
-import { generateTrendsImage, DayStats, generateFeedSleepChart, FeedSleepDay } from './charts';
+import { generateTrendsImage, DayStats, generateFeedSleepChart, FeedSleepDay, generateMlSleepChart, MlSleepBucket } from './charts';
 import cron from 'node-cron';
 import {
   initDb,
@@ -24,6 +24,7 @@ import {
   setBabyName,
   getEventSummaryByDay,
   getFeedTimestampsForPeriod,
+  getFeedCorrelationData,
   VALID_NAPPY_TYPES,
 } from './db';
 
@@ -264,6 +265,7 @@ function trendsKeyboard() {
   return new InlineKeyboard()
     .text('📊 Activity Heatmap', 'trends:heatmap').row()
     .text('😴 Feed vs Sleep',    'trends:feedsleep').row()
+    .text('🍼 ml vs Sleep',      'trends:mlsleep').row()
     .text('⬅️ Back',             'cancel');
 }
 
@@ -583,6 +585,16 @@ bot.callbackQuery('trends:feedsleep', async (ctx) => {
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
     await sendFeedSleepChart(chatId, primaryId);
+  }
+});
+
+bot.callbackQuery('trends:mlsleep', async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery('Generating chart…');
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendMlSleepChart(chatId, primaryId);
   }
 });
 
@@ -1026,6 +1038,68 @@ async function sendFeedSleepChart(chatId: number, primaryId: number) {
 
   await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'feed-sleep.png'), {
     caption,
+    reply_markup: menuKeyboard(),
+  });
+}
+
+// ============================================================
+// ml vs Sleep correlation helper
+// ============================================================
+
+const ML_SLEEP_DAYS = 60;
+
+function computeMlSleepBuckets(
+  rows: Array<{ amount_ml: number; logged_at: Date }>
+): MlSleepBucket[] {
+  // For each consecutive feed pair, record (ml of first feed, hours until next feed)
+  const pairs: { ml: number; sleepH: number }[] = [];
+  for (let i = 0; i + 1 < rows.length; i++) {
+    const sleepH = (new Date(rows[i + 1].logged_at).getTime() - new Date(rows[i].logged_at).getTime()) / 3_600_000;
+    pairs.push({ ml: rows[i].amount_ml, sleepH });
+  }
+
+  // Group by exact ml amount
+  const groups = new Map<number, number[]>();
+  for (const { ml, sleepH } of pairs) {
+    const arr = groups.get(ml) ?? [];
+    arr.push(sleepH);
+    groups.set(ml, arr);
+  }
+
+  // Sort by ml, compute average per group
+  return [...groups.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([amountMl, sleeps]) => ({
+      amountMl,
+      avgSleepH: sleeps.reduce((s, v) => s + v, 0) / sleeps.length,
+      count: sleeps.length,
+    }));
+}
+
+async function sendMlSleepChart(chatId: number, primaryId: number) {
+  const babyName = await getCachedBabyName(primaryId) ?? 'Baby';
+  const fromDate = offsetDate(todayStr(), -ML_SLEEP_DAYS);
+
+  const rows    = await getFeedCorrelationData(primaryId, fromDate, TZ);
+  const buckets = computeMlSleepBuckets(rows);
+
+  const imgBuf = await generateMlSleepChart(buckets, babyName, ML_SLEEP_DAYS);
+
+  const totalPairs = buckets.reduce((s, b) => s + b.count, 0);
+  const best = buckets.length > 0
+    ? buckets.reduce((a, b) => b.avgSleepH > a.avgSleepH ? b : a)
+    : null;
+
+  const caption =
+    `🍼 ${babyName}'s milk vs sleep — last ${ML_SLEEP_DAYS} days\n\n` +
+    (best
+      ? `💤 Longest sleep after *${best.amountMl}ml* (avg ${best.avgSleepH.toFixed(1)}h)\n` +
+        `📊 Based on ${totalPairs} feed→sleep pairs`
+      : `Not enough feeds logged yet to show correlation.`);
+
+  await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'ml-sleep.png'), {
+    caption,
+    parse_mode: 'Markdown',
     reply_markup: menuKeyboard(),
   });
 }
