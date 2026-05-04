@@ -250,3 +250,147 @@ export async function generateTrendsImage(
 
   return canvas.toBuffer('image/png');
 }
+
+// ── Feed vs Sleep correlation chart ──────────────────────────────────────────
+
+export interface FeedSleepDay {
+  feedCount:     number;
+  avgSleepHours: number | null;
+}
+
+const FS_DAYS    = 14;
+const FS_BAR_W   = 12;
+const FS_CHART_H = 100;
+const FS_TITLE_H = 20;
+const FS_XLBL_H  = 22;
+const FS_SEC_H   = FS_TITLE_H + FS_CHART_H + FS_XLBL_H;  // 142
+const FS_SEC_GAP = 16;
+const FS_H       = PAD + HEADER_H + FS_SEC_H + FS_SEC_GAP + FS_SEC_H + PAD;  // 376
+
+const FS_LPAD    = 36;
+const FS_X0      = PAD + FS_LPAD;                         // 56
+const FS_CHART_W = W - PAD - FS_LPAD - PAD;               // 264
+const FS_BSTEP   = Math.floor(FS_CHART_W / FS_DAYS);      // 18
+
+const BAR_FEED   = '#5b8dee';
+const BAR_SLEEP  = '#ff9a3c';
+const BAR_EMPTY  = '#edebe6';
+const GRID_LINE  = '#f0ede8';
+const AXIS_LINE  = '#d0cdc8';
+
+/**
+ * Returns a PNG Buffer with two stacked bar charts for the last 14 days:
+ *   top    = feeds per day  (blue bars)
+ *   bottom = avg sleep between feeds in hours  (orange bars)
+ */
+export async function generateFeedSleepChart(
+  data:         Map<string, FeedSleepDay>,
+  babyName:     string,
+  fromDateStr:  string,
+  todayDateStr: string,
+): Promise<Buffer> {
+  const canvas = createCanvas(W, FS_H);
+  const ctx    = canvas.getContext('2d') as any;
+
+  roundRect(ctx, 0, 0, W, FS_H, 10, BG);
+
+  ctx.fillStyle = TEXT_DK;
+  ctx.font      = 'bold 14px Roboto';
+  ctx.textAlign = 'left';
+  ctx.fillText(`${babyName}'s feed & sleep — last ${FS_DAYS} days`, PAD, PAD + 22);
+
+  // Build ordered date list for the window
+  const dates: string[] = [];
+  {
+    let d = new Date(fromDateStr + 'T12:00:00Z');
+    const end = new Date(todayDateStr + 'T12:00:00Z');
+    while (d <= end) {
+      dates.push(d.toISOString().slice(0, 10));
+      d = new Date(d.getTime() + 86_400_000);
+    }
+  }
+
+  let maxFeeds = 1, maxSleep = 0.1;
+  for (const v of data.values()) {
+    if (v.feedCount > maxFeeds) maxFeeds = v.feedCount;
+    if (v.avgSleepHours !== null && v.avgSleepHours > maxSleep) maxSleep = v.avgSleepHours;
+  }
+
+  function renderSection(
+    sY:       number,
+    title:    string,
+    barColor: string,
+    getValue: (d: FeedSleepDay) => number | null,
+    maxVal:   number,
+    yTopLbl:  string,
+  ) {
+    const chartTop = sY + FS_TITLE_H;
+    const chartBot = chartTop + FS_CHART_H;
+
+    ctx.font      = 'bold 12px Roboto';
+    ctx.fillStyle = TEXT_DK;
+    ctx.textAlign = 'left';
+    ctx.fillText(title, PAD, sY + 14);
+
+    // Horizontal gridlines at 50% and 100%
+    ctx.strokeStyle = GRID_LINE;
+    ctx.lineWidth   = 1;
+    for (const frac of [0.5, 1.0]) {
+      const gy = chartBot - Math.round(frac * FS_CHART_H);
+      ctx.beginPath();
+      ctx.moveTo(FS_X0, gy);
+      ctx.lineTo(FS_X0 + FS_CHART_W, gy);
+      ctx.stroke();
+    }
+
+    // Y-axis labels
+    ctx.font      = '9px Roboto';
+    ctx.fillStyle = TEXT_LT;
+    ctx.textAlign = 'right';
+    ctx.fillText('0',     FS_X0 - 4, chartBot + 3);
+    ctx.fillText(yTopLbl, FS_X0 - 4, chartTop  + 5);
+
+    // Bars + x-axis labels
+    for (let i = 0; i < dates.length; i++) {
+      const day   = dates[i];
+      const stats = data.get(day);
+      const val   = stats ? getValue(stats) : null;
+      const bx    = FS_X0 + i * FS_BSTEP + Math.floor((FS_BSTEP - FS_BAR_W) / 2);
+
+      if (val === null || val === 0) {
+        roundRect(ctx, bx, chartBot - 4, FS_BAR_W, 4, 1, BAR_EMPTY);
+      } else {
+        const barH = Math.max(4, Math.round((val / maxVal) * FS_CHART_H));
+        roundRect(ctx, bx, chartBot - barH, FS_BAR_W, barH, 2, barColor);
+      }
+
+      // Date label every 2 bars
+      if (i % 2 === 0) {
+        const dt  = new Date(day + 'T12:00:00Z');
+        const lbl = `${dt.getUTCDate()} ${dt.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' })}`;
+        ctx.font      = '8px Roboto';
+        ctx.fillStyle = TEXT_LT;
+        ctx.textAlign = 'center';
+        ctx.fillText(lbl, bx + FS_BAR_W / 2, chartBot + 14);
+      }
+    }
+
+    // Bottom axis line
+    ctx.strokeStyle = AXIS_LINE;
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(FS_X0, chartBot);
+    ctx.lineTo(FS_X0 + FS_CHART_W, chartBot);
+    ctx.stroke();
+  }
+
+  const sec1Y = PAD + HEADER_H;
+  const sec2Y = sec1Y + FS_SEC_H + FS_SEC_GAP;
+
+  renderSection(sec1Y, 'Feeds per day',                    BAR_FEED,
+    v => v.feedCount,     maxFeeds, String(maxFeeds));
+  renderSection(sec2Y, 'Avg sleep between feeds (hours)',  BAR_SLEEP,
+    v => v.avgSleepHours, maxSleep, maxSleep.toFixed(1) + 'h');
+
+  return canvas.toBuffer('image/png');
+}

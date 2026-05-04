@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
-import { generateTrendsImage, DayStats } from './charts';
+import { generateTrendsImage, DayStats, generateFeedSleepChart, FeedSleepDay } from './charts';
 import cron from 'node-cron';
 import {
   initDb,
@@ -23,6 +23,7 @@ import {
   getBabyName,
   setBabyName,
   getEventSummaryByDay,
+  getFeedTimestampsForPeriod,
   VALID_NAPPY_TYPES,
 } from './db';
 
@@ -259,6 +260,13 @@ function menuKeyboard() {
     .text('💩💧 Both', 'nappy:both');
 }
 
+function trendsKeyboard() {
+  return new InlineKeyboard()
+    .text('📊 Activity Heatmap', 'trends:heatmap').row()
+    .text('😴 Feed vs Sleep',    'trends:feedsleep').row()
+    .text('⬅️ Back',             'cancel');
+}
+
 function mlKeyboard() {
   return new InlineKeyboard()
     .text('90ml', 'feed_ml:90').text('100ml', 'feed_ml:100')
@@ -391,10 +399,8 @@ bot.command('delete', async (ctx) => {
 bot.command('trends', async (ctx) => {
   conv.delete(ctx.chat.id);
   if (!await guard(ctx)) return;
-  await ctx.replyWithChatAction('upload_photo');
   await registerChat(ctx.chat.id);
-  const primaryId = await resolvePrimaryChat(ctx.chat.id);
-  await sendTrends(ctx.chat.id, primaryId);
+  await ctx.reply('📈 Which trend would you like to see?', { reply_markup: trendsKeyboard() });
 });
 
 bot.command('share', async (ctx) => {
@@ -554,11 +560,29 @@ bot.callbackQuery('menu:delete', async (ctx) => {
 
 bot.callbackQuery('menu:trends', async (ctx) => {
   if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText('📈 Which trend would you like to see?', {
+    reply_markup: trendsKeyboard(),
+  });
+});
+
+bot.callbackQuery('trends:heatmap', async (ctx) => {
+  if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery('Generating chart…');
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
     await sendTrends(chatId, primaryId);
+  }
+});
+
+bot.callbackQuery('trends:feedsleep', async (ctx) => {
+  if (!await guard(ctx)) return;
+  await ctx.answerCallbackQuery('Generating chart…');
+  const chatId = getChatId(ctx);
+  if (chatId) {
+    const primaryId = await resolvePrimaryChat(chatId);
+    await sendFeedSleepChart(chatId, primaryId);
   }
 });
 
@@ -920,6 +944,87 @@ async function sendTrends(chatId: number, primaryId: number) {
     `🚼 Past 7 days: ${weekTotalNappy} nappy change${weekTotalNappy !== 1 ? 's' : ''}`;
 
   await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'trends.png'), {
+    caption,
+    reply_markup: menuKeyboard(),
+  });
+}
+
+// ============================================================
+// Feed vs Sleep chart helper
+// ============================================================
+
+const FEED_SLEEP_DAYS = 14;
+
+function computeFeedSleepStats(
+  rows:        Array<{ day: string; logged_at: Date }>,
+  fromDateStr: string,
+  toDateStr:   string,
+): Map<string, FeedSleepDay> {
+  // Build ordered date list for the display window
+  const dates: string[] = [];
+  {
+    let d = new Date(fromDateStr + 'T12:00:00Z');
+    const end = new Date(toDateStr + 'T12:00:00Z');
+    while (d <= end) {
+      dates.push(d.toISOString().slice(0, 10));
+      d = new Date(d.getTime() + 86_400_000);
+    }
+  }
+
+  // Sort by time (DB already orders, but guard against edge cases)
+  const times = rows
+    .map(r => ({ day: r.day, t: new Date(r.logged_at) }))
+    .sort((a, b) => a.t.getTime() - b.t.getTime());
+
+  // Compute inter-feed gaps; assign each gap to the day of the later feed
+  const gapsByDay = new Map<string, number[]>();
+  for (let i = 1; i < times.length; i++) {
+    const gapH = (times[i].t.getTime() - times[i - 1].t.getTime()) / 3_600_000;
+    const day  = times[i].day;
+    const arr  = gapsByDay.get(day) ?? [];
+    arr.push(gapH);
+    gapsByDay.set(day, arr);
+  }
+
+  const result = new Map<string, FeedSleepDay>();
+  for (const day of dates) {
+    const feedCount     = times.filter(t => t.day === day).length;
+    const gaps          = gapsByDay.get(day) ?? [];
+    const avgSleepHours = gaps.length > 0
+      ? gaps.reduce((s, g) => s + g, 0) / gaps.length
+      : null;
+    result.set(day, { feedCount, avgSleepHours });
+  }
+  return result;
+}
+
+async function sendFeedSleepChart(chatId: number, primaryId: number) {
+  const babyName = await getCachedBabyName(primaryId) ?? 'Baby';
+  const toDate   = todayStr();
+  const fromDate = offsetDate(toDate, -(FEED_SLEEP_DAYS - 1));
+
+  const rows = await getFeedTimestampsForPeriod(primaryId, fromDate, toDate, TZ);
+  const data = computeFeedSleepStats(rows, fromDate, toDate);
+
+  const imgBuf = await generateFeedSleepChart(data, babyName, fromDate, toDate);
+
+  // Summary stats for caption
+  let totalFeeds = 0, sleepSum = 0, sleepCount = 0;
+  for (const v of data.values()) {
+    totalFeeds += v.feedCount;
+    if (v.avgSleepHours !== null) { sleepSum += v.avgSleepHours; sleepCount++; }
+  }
+  const avgFeedsPerDay = (totalFeeds / FEED_SLEEP_DAYS).toFixed(1);
+  const avgSleepHours  = sleepCount > 0 ? (sleepSum / sleepCount).toFixed(1) : null;
+
+  const caption =
+    `😴 ${babyName}'s feed & sleep — last ${FEED_SLEEP_DAYS} days\n\n` +
+    `🍼 Avg ${avgFeedsPerDay} feeds/day\n` +
+    (avgSleepHours !== null
+      ? `💤 Avg ${avgSleepHours}h between feeds`
+      : `💤 Not enough data to calculate sleep gaps`);
+
+  await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'feed-sleep.png'), {
     caption,
     reply_markup: menuKeyboard(),
   });

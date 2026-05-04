@@ -233,6 +233,27 @@ export async function getEventSummaryByDay(
   return result.rows;
 }
 
+export async function getFeedTimestampsForPeriod(
+  chatId: number,
+  fromDateStr: string,
+  toDateStr: string,
+  tz: string
+): Promise<Array<{ day: string; logged_at: Date }>> {
+  const result = await pool.query(
+    `SELECT
+       ((logged_at AT TIME ZONE $4)::date)::text AS day,
+       logged_at
+     FROM events
+     WHERE chat_id = $1
+       AND type = 'feed'
+       AND (logged_at AT TIME ZONE $4)::date >= ($2::date - INTERVAL '1 day')
+       AND (logged_at AT TIME ZONE $4)::date <= $3::date
+     ORDER BY logged_at ASC`,
+    [chatId, fromDateStr, toDateStr, tz]
+  );
+  return result.rows;
+}
+
 export async function getAllChats(): Promise<number[]> {
   const result = await pool.query('SELECT chat_id FROM chats');
   return result.rows.map((r) => Number(r.chat_id));
