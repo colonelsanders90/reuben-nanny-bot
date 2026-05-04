@@ -395,127 +395,155 @@ export async function generateFeedSleepChart(
   return canvas.toBuffer('image/png');
 }
 
-// ── ml vs Sleep correlation chart ─────────────────────────────────────────────
+// ── ml vs Sleep scatter + trend line ─────────────────────────────────────────
 
-export interface MlSleepBucket {
-  amountMl:  number;
-  avgSleepH: number;
-  count:     number;
+export interface MlSleepPoint {
+  ml:     number;
+  sleepH: number;
 }
 
-const ML_CHART_H = 140;
-const ML_XLBL_H  = 34;   // two lines: ml label + n= count
-const ML_NOTE_H  = 18;
-const ML_H       = PAD + HEADER_H + FS_TITLE_H + ML_CHART_H + ML_XLBL_H + ML_NOTE_H + PAD;
-// = 20 + 36 + 20 + 140 + 34 + 18 + 20 = 288
+const SC_LPAD    = 40;                        // wider left margin for "Xh" labels
+const SC_X0      = PAD + SC_LPAD;             // 60
+const SC_CHART_W = W - PAD - SC_LPAD - PAD;  // 260
+const SC_CHART_H = 180;
+const SC_SUB_H   = 16;   // subtitle line height
+const SC_XAXIS_H = 28;   // x-axis label area
+const SC_NOTE_H  = 18;   // footnote
+const SC_H       = PAD + HEADER_H + SC_SUB_H + SC_CHART_H + SC_XAXIS_H + SC_NOTE_H + PAD;
+//                = 20 + 36 + 16 + 180 + 28 + 18 + 20 = 318
 
-const BAR_ML = '#9c6ade';
+const DOT_R       = 4;
+const DOT_COLOR   = 'rgba(156, 106, 222, 0.65)';
+const TREND_COLOR = '#e05252';
 
 /**
- * Returns a PNG Buffer showing avg sleep duration after each feed amount.
- * Each bar = one distinct ml amount; height = avg hours until next feed.
+ * Returns a PNG Buffer: scatter plot of feed ml vs hours slept after,
+ * with a linear regression trend line overlaid.
  */
 export async function generateMlSleepChart(
-  buckets:  MlSleepBucket[],
+  points:   MlSleepPoint[],
   babyName: string,
   days:     number,
 ): Promise<Buffer> {
-  const canvas = createCanvas(W, ML_H);
+  const canvas = createCanvas(W, SC_H);
   const ctx    = canvas.getContext('2d') as any;
 
-  roundRect(ctx, 0, 0, W, ML_H, 10, BG);
+  roundRect(ctx, 0, 0, W, SC_H, 10, BG);
 
+  // Header
   ctx.fillStyle = TEXT_DK;
   ctx.font      = 'bold 14px Roboto';
   ctx.textAlign = 'left';
   ctx.fillText(`${babyName}'s milk vs sleep`, PAD, PAD + 22);
 
-  ctx.font      = 'bold 12px Roboto';
-  ctx.fillStyle = TEXT_DK;
-  ctx.fillText('Avg sleep after each feed amount', PAD, PAD + HEADER_H + 14);
-
-  const LPAD   = 36;
-  const x0     = PAD + LPAD;
-  const chartW = W - PAD - LPAD - PAD;   // 264
-
-  const chartTop = PAD + HEADER_H + FS_TITLE_H;
-  const chartBot = chartTop + ML_CHART_H;
-
-  const shown = buckets.slice(0, 12);
-  const n     = shown.length;
-
-  let maxSleep = 0.1;
-  for (const b of shown) if (b.avgSleepH > maxSleep) maxSleep = b.avgSleepH;
-
-  // Gridlines at 50% and 100%
-  ctx.strokeStyle = GRID_LINE;
-  ctx.lineWidth   = 1;
-  for (const frac of [0.5, 1.0]) {
-    const gy = chartBot - Math.round(frac * ML_CHART_H);
-    ctx.beginPath();
-    ctx.moveTo(x0, gy);
-    ctx.lineTo(x0 + chartW, gy);
-    ctx.stroke();
-  }
-
-  // Y-axis labels
+  // Subtitle
   ctx.font      = '9px Roboto';
   ctx.fillStyle = TEXT_LT;
-  ctx.textAlign = 'right';
-  ctx.fillText('0',                       x0 - 4, chartBot + 3);
-  ctx.fillText(maxSleep.toFixed(1) + 'h', x0 - 4, chartTop  + 5);
+  ctx.fillText('Each dot = one feed · red line = trend', PAD, PAD + HEADER_H + 11);
 
-  if (n === 0) {
+  const chartY0  = PAD + HEADER_H + SC_SUB_H;
+  const chartBot = chartY0 + SC_CHART_H;
+
+  if (points.length < 2) {
     ctx.font      = '11px Roboto';
     ctx.fillStyle = TEXT_LT;
     ctx.textAlign = 'center';
-    ctx.fillText('Not enough data yet — log more feeds', x0 + chartW / 2, chartTop + ML_CHART_H / 2);
-  } else {
-    const bStep = Math.floor(chartW / n);
-    const bw    = Math.max(16, bStep - 10);
-
-    for (let i = 0; i < n; i++) {
-      const b  = shown[i];
-      const bx = x0 + i * bStep + Math.floor((bStep - bw) / 2);
-
-      const barH = Math.max(4, Math.round((b.avgSleepH / maxSleep) * ML_CHART_H));
-      roundRect(ctx, bx, chartBot - barH, bw, barH, 2, BAR_ML);
-
-      // Avg value just above the bar
-      ctx.font      = '8px Roboto';
-      ctx.fillStyle = TEXT_LT;
-      ctx.textAlign = 'center';
-      ctx.fillText(b.avgSleepH.toFixed(1) + 'h', bx + bw / 2, chartBot - barH - 4);
-
-      // ml label below the axis
-      ctx.font      = '9px Roboto';
-      ctx.fillStyle = TEXT_LT;
-      ctx.fillText(`${b.amountMl}ml`, bx + bw / 2, chartBot + 14);
-
-      // sample count on second line
-      ctx.font      = '8px Roboto';
-      ctx.fillStyle = TEXT_LT;
-      ctx.fillText(`n=${b.count}`, bx + bw / 2, chartBot + 26);
-    }
+    ctx.fillText('Not enough data yet — log more feeds', SC_X0 + SC_CHART_W / 2, chartY0 + SC_CHART_H / 2);
+    return canvas.toBuffer('image/png');
   }
 
-  // Bottom axis line
+  // Axis ranges
+  const mlValues = points.map(p => p.ml);
+  const minMl    = Math.min(...mlValues);
+  const maxMl    = Math.max(...mlValues);
+  const mlPad    = Math.max(8, (maxMl - minMl) * 0.12) || 10;
+  const xMin     = minMl - mlPad;
+  const xMax     = maxMl + mlPad;
+
+  const maxSleep = Math.max(...points.map(p => p.sleepH));
+  const yMax     = Math.max(maxSleep * 1.15, 1);
+
+  const toCanvasX = (ml: number)     => SC_X0 + (ml - xMin) / (xMax - xMin) * SC_CHART_W;
+  const toCanvasY = (sleepH: number) => chartBot - Math.min(sleepH, yMax) / yMax * SC_CHART_H;
+
+  // Horizontal gridlines at each whole hour
+  const yTickMax = Math.ceil(yMax);
+  ctx.strokeStyle = GRID_LINE;
+  ctx.lineWidth   = 1;
+  for (let h = 0; h <= yTickMax; h++) {
+    if (h > yMax) break;
+    const gy = toCanvasY(h);
+    ctx.beginPath();
+    ctx.moveTo(SC_X0, gy);
+    ctx.lineTo(SC_X0 + SC_CHART_W, gy);
+    ctx.stroke();
+    ctx.font      = '9px Roboto';
+    ctx.fillStyle = TEXT_LT;
+    ctx.textAlign = 'right';
+    ctx.fillText(`${h}h`, SC_X0 - 4, gy + 4);
+  }
+
+  // X-axis ticks at each distinct ml value
+  const distinctMl = [...new Set(mlValues)].sort((a, b) => a - b);
+  ctx.strokeStyle = AXIS_LINE;
+  ctx.lineWidth   = 1;
+  for (const ml of distinctMl) {
+    const cx = toCanvasX(ml);
+    ctx.beginPath();
+    ctx.moveTo(cx, chartBot);
+    ctx.lineTo(cx, chartBot + 4);
+    ctx.stroke();
+    ctx.font      = '9px Roboto';
+    ctx.fillStyle = TEXT_LT;
+    ctx.textAlign = 'center';
+    ctx.fillText(`${ml}ml`, cx, chartBot + 16);
+  }
+
+  // Axes
   ctx.strokeStyle = AXIS_LINE;
   ctx.lineWidth   = 1;
   ctx.beginPath();
-  ctx.moveTo(x0, chartBot);
-  ctx.lineTo(x0 + chartW, chartBot);
+  ctx.moveTo(SC_X0, chartBot);
+  ctx.lineTo(SC_X0 + SC_CHART_W, chartBot);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(SC_X0, chartY0);
+  ctx.lineTo(SC_X0, chartBot);
   ctx.stroke();
 
+  // Linear regression
+  const n     = points.length;
+  const sumX  = points.reduce((s, p) => s + p.ml, 0);
+  const sumY  = points.reduce((s, p) => s + p.sleepH, 0);
+  const sumXY = points.reduce((s, p) => s + p.ml * p.sleepH, 0);
+  const sumXX = points.reduce((s, p) => s + p.ml * p.ml, 0);
+  const denom = n * sumXX - sumX * sumX;
+
+  if (denom !== 0) {
+    const slope     = (n * sumXY - sumX * sumY) / denom;
+    const intercept = (sumY - slope * sumX) / n;
+    const clamp     = (v: number) => Math.max(0, Math.min(yMax, v));
+    ctx.strokeStyle = TREND_COLOR;
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(toCanvasX(xMin), toCanvasY(clamp(slope * xMin + intercept)));
+    ctx.lineTo(toCanvasX(xMax), toCanvasY(clamp(slope * xMax + intercept)));
+    ctx.stroke();
+  }
+
+  // Scatter dots (on top of trend line)
+  for (const p of points) {
+    ctx.beginPath();
+    ctx.arc(toCanvasX(p.ml), toCanvasY(p.sleepH), DOT_R, 0, Math.PI * 2);
+    ctx.fillStyle = DOT_COLOR;
+    ctx.fill();
+  }
+
   // Footnote
-  const totalFeeds = shown.reduce((s, b) => s + b.count, 0);
   ctx.font      = '8px Roboto';
   ctx.fillStyle = TEXT_LT;
   ctx.textAlign = 'left';
-  ctx.fillText(
-    `Based on ${totalFeeds} feeds over the last ${days} days`,
-    PAD, chartBot + ML_XLBL_H + ML_NOTE_H - 4
-  );
+  ctx.fillText(`${n} feed→sleep pairs · last ${days} days`, PAD, chartBot + SC_XAXIS_H + SC_NOTE_H - 2);
 
   return canvas.toBuffer('image/png');
 }
