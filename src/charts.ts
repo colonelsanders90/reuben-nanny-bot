@@ -394,3 +394,128 @@ export async function generateFeedSleepChart(
 
   return canvas.toBuffer('image/png');
 }
+
+// ── ml vs Sleep correlation chart ─────────────────────────────────────────────
+
+export interface MlSleepBucket {
+  amountMl:  number;
+  avgSleepH: number;
+  count:     number;
+}
+
+const ML_CHART_H = 140;
+const ML_XLBL_H  = 34;   // two lines: ml label + n= count
+const ML_NOTE_H  = 18;
+const ML_H       = PAD + HEADER_H + FS_TITLE_H + ML_CHART_H + ML_XLBL_H + ML_NOTE_H + PAD;
+// = 20 + 36 + 20 + 140 + 34 + 18 + 20 = 288
+
+const BAR_ML = '#9c6ade';
+
+/**
+ * Returns a PNG Buffer showing avg sleep duration after each feed amount.
+ * Each bar = one distinct ml amount; height = avg hours until next feed.
+ */
+export async function generateMlSleepChart(
+  buckets:  MlSleepBucket[],
+  babyName: string,
+  days:     number,
+): Promise<Buffer> {
+  const canvas = createCanvas(W, ML_H);
+  const ctx    = canvas.getContext('2d') as any;
+
+  roundRect(ctx, 0, 0, W, ML_H, 10, BG);
+
+  ctx.fillStyle = TEXT_DK;
+  ctx.font      = 'bold 14px Roboto';
+  ctx.textAlign = 'left';
+  ctx.fillText(`${babyName}'s milk vs sleep`, PAD, PAD + 22);
+
+  ctx.font      = 'bold 12px Roboto';
+  ctx.fillStyle = TEXT_DK;
+  ctx.fillText('Avg sleep after each feed amount', PAD, PAD + HEADER_H + 14);
+
+  const LPAD   = 36;
+  const x0     = PAD + LPAD;
+  const chartW = W - PAD - LPAD - PAD;   // 264
+
+  const chartTop = PAD + HEADER_H + FS_TITLE_H;
+  const chartBot = chartTop + ML_CHART_H;
+
+  const shown = buckets.slice(0, 12);
+  const n     = shown.length;
+
+  let maxSleep = 0.1;
+  for (const b of shown) if (b.avgSleepH > maxSleep) maxSleep = b.avgSleepH;
+
+  // Gridlines at 50% and 100%
+  ctx.strokeStyle = GRID_LINE;
+  ctx.lineWidth   = 1;
+  for (const frac of [0.5, 1.0]) {
+    const gy = chartBot - Math.round(frac * ML_CHART_H);
+    ctx.beginPath();
+    ctx.moveTo(x0, gy);
+    ctx.lineTo(x0 + chartW, gy);
+    ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.font      = '9px Roboto';
+  ctx.fillStyle = TEXT_LT;
+  ctx.textAlign = 'right';
+  ctx.fillText('0',                       x0 - 4, chartBot + 3);
+  ctx.fillText(maxSleep.toFixed(1) + 'h', x0 - 4, chartTop  + 5);
+
+  if (n === 0) {
+    ctx.font      = '11px Roboto';
+    ctx.fillStyle = TEXT_LT;
+    ctx.textAlign = 'center';
+    ctx.fillText('Not enough data yet — log more feeds', x0 + chartW / 2, chartTop + ML_CHART_H / 2);
+  } else {
+    const bStep = Math.floor(chartW / n);
+    const bw    = Math.max(16, bStep - 10);
+
+    for (let i = 0; i < n; i++) {
+      const b  = shown[i];
+      const bx = x0 + i * bStep + Math.floor((bStep - bw) / 2);
+
+      const barH = Math.max(4, Math.round((b.avgSleepH / maxSleep) * ML_CHART_H));
+      roundRect(ctx, bx, chartBot - barH, bw, barH, 2, BAR_ML);
+
+      // Avg value just above the bar
+      ctx.font      = '8px Roboto';
+      ctx.fillStyle = TEXT_LT;
+      ctx.textAlign = 'center';
+      ctx.fillText(b.avgSleepH.toFixed(1) + 'h', bx + bw / 2, chartBot - barH - 4);
+
+      // ml label below the axis
+      ctx.font      = '9px Roboto';
+      ctx.fillStyle = TEXT_LT;
+      ctx.fillText(`${b.amountMl}ml`, bx + bw / 2, chartBot + 14);
+
+      // sample count on second line
+      ctx.font      = '8px Roboto';
+      ctx.fillStyle = TEXT_LT;
+      ctx.fillText(`n=${b.count}`, bx + bw / 2, chartBot + 26);
+    }
+  }
+
+  // Bottom axis line
+  ctx.strokeStyle = AXIS_LINE;
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, chartBot);
+  ctx.lineTo(x0 + chartW, chartBot);
+  ctx.stroke();
+
+  // Footnote
+  const totalFeeds = shown.reduce((s, b) => s + b.count, 0);
+  ctx.font      = '8px Roboto';
+  ctx.fillStyle = TEXT_LT;
+  ctx.textAlign = 'left';
+  ctx.fillText(
+    `Based on ${totalFeeds} feeds over the last ${days} days`,
+    PAD, chartBot + ML_XLBL_H + ML_NOTE_H - 4
+  );
+
+  return canvas.toBuffer('image/png');
+}

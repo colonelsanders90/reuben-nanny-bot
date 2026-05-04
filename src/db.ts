@@ -254,6 +254,23 @@ export async function getFeedTimestampsForPeriod(
   return result.rows;
 }
 
+export async function getFeedCorrelationData(
+  chatId: number,
+  fromDateStr: string,
+  tz: string
+): Promise<Array<{ amount_ml: number; logged_at: Date }>> {
+  const result = await pool.query(
+    `SELECT amount_ml, logged_at
+     FROM events
+     WHERE chat_id = $1
+       AND type = 'feed'
+       AND (logged_at AT TIME ZONE $3)::date >= $2::date
+     ORDER BY logged_at ASC`,
+    [chatId, fromDateStr, tz]
+  );
+  return result.rows;
+}
+
 export async function getAllChats(): Promise<number[]> {
   const result = await pool.query('SELECT chat_id FROM chats');
   return result.rows.map((r) => Number(r.chat_id));
