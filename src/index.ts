@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
-import { generateTrendsImage, DayStats, generateFeedSleepChart, FeedSleepDay, generateMlSleepChart, MlSleepBucket } from './charts';
+import { generateTrendsImage, DayStats, generateFeedSleepChart, FeedSleepDay, generateMlSleepChart, MlSleepPoint } from './charts';
 import cron from 'node-cron';
 import {
   initDb,
@@ -1048,58 +1048,46 @@ async function sendFeedSleepChart(chatId: number, primaryId: number) {
 
 const ML_SLEEP_DAYS = 60;
 
-function computeMlSleepBuckets(
+function computeMlSleepPoints(
   rows: Array<{ amount_ml: number; logged_at: Date }>
-): MlSleepBucket[] {
-  // For each consecutive feed pair, record (ml of first feed, hours until next feed)
-  const pairs: { ml: number; sleepH: number }[] = [];
+): MlSleepPoint[] {
+  const points: MlSleepPoint[] = [];
   for (let i = 0; i + 1 < rows.length; i++) {
     const sleepH = (new Date(rows[i + 1].logged_at).getTime() - new Date(rows[i].logged_at).getTime()) / 3_600_000;
-    pairs.push({ ml: rows[i].amount_ml, sleepH });
+    points.push({ ml: rows[i].amount_ml, sleepH });
   }
-
-  // Group by exact ml amount
-  const groups = new Map<number, number[]>();
-  for (const { ml, sleepH } of pairs) {
-    const arr = groups.get(ml) ?? [];
-    arr.push(sleepH);
-    groups.set(ml, arr);
-  }
-
-  // Sort by ml, compute average per group
-  return [...groups.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([amountMl, sleeps]) => ({
-      amountMl,
-      avgSleepH: sleeps.reduce((s, v) => s + v, 0) / sleeps.length,
-      count: sleeps.length,
-    }));
+  return points;
 }
 
 async function sendMlSleepChart(chatId: number, primaryId: number) {
   const babyName = await getCachedBabyName(primaryId) ?? 'Baby';
   const fromDate = offsetDate(todayStr(), -ML_SLEEP_DAYS);
 
-  const rows    = await getFeedCorrelationData(primaryId, fromDate, TZ);
-  const buckets = computeMlSleepBuckets(rows);
+  const rows   = await getFeedCorrelationData(primaryId, fromDate, TZ);
+  const points = computeMlSleepPoints(rows);
 
-  const imgBuf = await generateMlSleepChart(buckets, babyName, ML_SLEEP_DAYS);
+  const imgBuf = await generateMlSleepChart(points, babyName, ML_SLEEP_DAYS);
 
-  const totalPairs = buckets.reduce((s, b) => s + b.count, 0);
-  const best = buckets.length > 0
-    ? buckets.reduce((a, b) => b.avgSleepH > a.avgSleepH ? b : a)
-    : null;
+  const n = points.length;
+  let caption = `🍼 ${babyName}'s milk vs sleep — last ${ML_SLEEP_DAYS} days\n\n`;
 
-  const caption =
-    `🍼 ${babyName}'s milk vs sleep — last ${ML_SLEEP_DAYS} days\n\n` +
-    (best
-      ? `💤 Longest sleep after *${best.amountMl}ml* (avg ${best.avgSleepH.toFixed(1)}h)\n` +
-        `📊 Based on ${totalPairs} feed→sleep pairs`
-      : `Not enough feeds logged yet to show correlation.`);
+  if (n >= 2) {
+    const sumX  = points.reduce((s, p) => s + p.ml, 0);
+    const sumY  = points.reduce((s, p) => s + p.sleepH, 0);
+    const sumXY = points.reduce((s, p) => s + p.ml * p.sleepH, 0);
+    const sumXX = points.reduce((s, p) => s + p.ml * p.ml, 0);
+    const denom = n * sumXX - sumX * sumX;
+    const slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+    const dir   = slope > 0.02 ? '📈 More milk → longer sleep'
+                : slope < -0.02 ? '📉 More milk → shorter sleep'
+                : '➡️ No strong ml↔sleep correlation';
+    caption += `${dir}\n📊 ${n} feed→sleep pairs`;
+  } else {
+    caption += 'Not enough feeds logged yet.';
+  }
 
   await bot.api.sendPhoto(chatId, new InputFile(imgBuf, 'ml-sleep.png'), {
     caption,
-    parse_mode: 'Markdown',
     reply_markup: menuKeyboard(),
   });
 }
