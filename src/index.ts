@@ -563,9 +563,16 @@ bot.callbackQuery('menu:delete', async (ctx) => {
 bot.callbackQuery('menu:trends', async (ctx) => {
   if (!await guard(ctx)) return;
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText('📈 Which trend would you like to see?', {
-    reply_markup: trendsKeyboard(),
-  });
+  try {
+    await ctx.editMessageText('📈 Which trend would you like to see?', {
+      reply_markup: trendsKeyboard(),
+    });
+  } catch {
+    // Source message is a photo (can't editMessageText) — send a fresh reply instead
+    await ctx.reply('📈 Which trend would you like to see?', {
+      reply_markup: trendsKeyboard(),
+    });
+  }
 });
 
 bot.callbackQuery('trends:heatmap', async (ctx) => {
@@ -574,6 +581,7 @@ bot.callbackQuery('trends:heatmap', async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
+    try { await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() }); } catch {}
     await sendTrends(chatId, primaryId);
   }
 });
@@ -584,6 +592,7 @@ bot.callbackQuery('trends:feedsleep', async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
+    try { await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() }); } catch {}
     await sendFeedSleepChart(chatId, primaryId);
   }
 });
@@ -594,6 +603,7 @@ bot.callbackQuery('trends:mlsleep', async (ctx) => {
   const chatId = getChatId(ctx);
   if (chatId) {
     const primaryId = await resolvePrimaryChat(chatId);
+    try { await ctx.editMessageText('What do you need?', { reply_markup: menuKeyboard() }); } catch {}
     await sendMlSleepChart(chatId, primaryId);
   }
 });
