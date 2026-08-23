@@ -14,6 +14,7 @@ export const pool = new Pool({
   max: 10,
   idleTimeoutMillis: 60_000,
   connectionTimeoutMillis: 5_000,
+  query_timeout: 8_000,
   ssl: sslConfig(),
 });
 

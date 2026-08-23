@@ -43,6 +43,19 @@ if (!token) {
 
 const bot = new Bot(token);
 
+// Add HTTP timeout to all Telegram API calls so a slow network can't hang the bot.
+// getUpdates uses a 30-second long poll, so allow 35s; everything else gets 10s.
+bot.api.config.use(async (prev, method, payload, signal) => {
+  const ms = method === 'getUpdates' ? 35_000 : 10_000;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await prev(method, payload, ac.signal as any);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 // ============================================================
 // Security: chat allowlist
 // ============================================================
