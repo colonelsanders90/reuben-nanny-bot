@@ -211,6 +211,33 @@ function parseHHMM(text: string): Date | null {
   return utcDate;
 }
 
+// Quick-log parser: "150" → 150ml now; "150 1410" or "150 930" → 150ml at 14:10/09:30
+// Returns null  → doesn't look like a feed shortcut (fall through)
+// Returns { error } → matched pattern but values are invalid
+// Returns { amountMl, loggedAt } → ready to log
+function parseQuickFeed(
+  text: string
+): { amountMl: number; loggedAt: Date } | { error: string } | null {
+  const m = text.match(/^(\d+)(?:\s+(\d{3,4}))?$/);
+  if (!m) return null;
+
+  const amountMl = parseInt(m[1], 10);
+  if (amountMl < 1 || amountMl > 600) {
+    return { error: `❌ Amount must be 1–600ml (got ${amountMl}ml).` };
+  }
+
+  if (!m[2]) return { amountMl, loggedAt: new Date() };
+
+  // Pad 3-digit time to 4 digits so parseHHMM handles it: 930 → "0930"
+  const timeStr = m[2].length === 3 ? '0' + m[2] : m[2];
+  const loggedAt = parseHHMM(timeStr);
+  if (!loggedAt) {
+    return { error: `❌ Invalid time "${m[2]}" — use HHMM or HMM (e.g. 1410 or 930).` };
+  }
+
+  return { amountMl, loggedAt };
+}
+
 function formatAgo(date: Date): string {
   const totalMins = Math.floor((Date.now() - date.getTime()) / 60_000);
   if (totalMins < 1) return 'just now';
@@ -379,6 +406,19 @@ bot.command('fed', async (ctx) => {
   conv.delete(ctx.chat.id);
   if (!await guard(ctx)) return;
   await registerChat(ctx.chat.id);
+
+  // Support "/fed 150" or "/fed 150 1410" as a direct quick-log
+  const args = (ctx.match as string | undefined)?.trim();
+  if (args) {
+    const quick = parseQuickFeed(args);
+    if (quick !== null) {
+      if ('error' in quick) { await ctx.reply(quick.error); return; }
+      await finishLog(ctx.chat.id, { step: 'feed_time', amountMl: quick.amountMl },
+        quick.loggedAt, (t, extra) => ctx.reply(t, extra));
+      return;
+    }
+  }
+
   const primaryId = await resolvePrimaryChat(ctx.chat.id);
   const babyName = await getCachedBabyName(primaryId) ?? 'baby';
   conv.set(ctx.chat.id, { step: 'feed_ml' });
@@ -811,11 +851,22 @@ bot.callbackQuery(/^daily:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
 
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
-  const state = conv.get(chatId);
-  if (!state) return;
-
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
+
+  const state = conv.get(chatId);
+
+  // Quick-log shortcut: "150" or "150 1410" — only outside an active conversation
+  if (!state) {
+    const quick = parseQuickFeed(text);
+    if (quick === null) return;
+    if (!await guard(ctx)) return;
+    await registerChat(chatId);
+    if ('error' in quick) { await ctx.reply(quick.error); return; }
+    await finishLog(chatId, { step: 'feed_time', amountMl: quick.amountMl },
+      quick.loggedAt, (t, extra) => ctx.reply(t, extra));
+    return;
+  }
 
   if (!await guard(ctx)) return;
 
